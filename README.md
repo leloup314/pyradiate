@@ -1,2 +1,3 @@
 # PyRadiate
-Gamma spectroscopy and dose calculations for radioactive sources and samples. 
+Dosimetry and spectroscopic analysis of radioactive sample or source spectra in Python.
+Successor of [irrad_spectroscopy](https://github.com/SiLab-Bonn/irrad_spectroscopy)
