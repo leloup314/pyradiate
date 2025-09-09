@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "pyradiate.__version__"}
+
+[project]
+name = "pyradiate"
+dynamic = ["version"]
+dependencies = [
+  "numpy",
+  "scipy",
+  "tqdm",
+  "matplotlib",
+  "nudel@git+https://github.com/op3/nudel.git"
+]
+requires-python = ">=3.12"
+authors = [
+  {name = "Pascal Wolf", email = "leloup314@posteo.de"}
+]
+maintainers = [
+  {name = "Pascal Wolf", email = "leloup314@posteo.de"}
+]
+description = "Spectroscopy and dosimetry calculations for radiactive samples in Python"
+readme = "README.md"
+license = "MIT"
+keywords = [
+  "spectroscopy",
+  "dosimetry",
+  "radiation",
+  "radioactive-source",
+  "gamma"
+]
+
+[project.scripts]
+dosimetry = "pyradiate.core.dosimetry:main"
+
+[project.urls]
+Repository = "https://github.com/leloup/pyradiate.git"
+"Bug Tracker" = "https://github.com/leloup314/pyradiate/issues"
+Changelog = "https://github.com/leloup314/blob/main/CHANGELOG.md"
