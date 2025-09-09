@@ -1,0 +1,12 @@
+# pyc
+*.pyc
+# pycharm
+.idea/
+# vscode
+.vscode/
+# egg-info folder
+*.egg-info/
+# virtual env dir
+.venv/
+# macOS stuff
+.DS_Store
