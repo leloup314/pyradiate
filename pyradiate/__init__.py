@@ -4,17 +4,17 @@ import os
 import logging
 from pathlib import Path
 
-#from pyradiate.tools import check_install
+# from pyradiate.tools import check_install
 
 
 # Version attribute that is picked dynaimcally by setuptools
-__version__ =  "0.0.1"
+__version__ = "0.0.1"
 
 
 # Package paths
 package_path = Path(__file__).parent
 data_path = Path.home() / Path(".local/share/pyradiate")
-config_path = Path.home() / Path(".config/pyradiate")    
+config_path = Path.home() / Path(".config/pyradiate")
 ensdf_path = Path.home() / Path(".local/share/pyradiate/ensdf")
 
 # Package files
@@ -36,6 +36,5 @@ if not ensdf_path.exists():
 
 
 # Create logger
-logging.basicConfig(level=logging.DEBUG,
-                    format="%(asctime)s [%(name)-17s] - %(levelname)-7s %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(name)-17s] - %(levelname)-7s %(message)s")
 logger = logging.getLogger("pyRADIATE")
