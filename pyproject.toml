@@ -49,6 +49,11 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest"
+]
+
 [project.scripts]
 dosimetry = "pyradiate.core.dosimetry:main"
 
