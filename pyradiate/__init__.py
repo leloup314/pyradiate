@@ -25,16 +25,11 @@ ensdf_config = config_path / "ensdf.yaml"
 os.environ["ENSDF_PATH"] = str(ensdf_path)
 
 # Check if required paths exists; if not, create
-if not data_path.exists():
-    data_path.mkdir()
-
-if not config_path.exists():
-    config_path.mkdir()
-
-if not ensdf_path.exists():
-    ensdf_path.mkdir()
+data_path.mkdir(parents=True, exist_ok=True)
+config_path.mkdir(parents=True, exist_ok=True)
+ensdf_path.mkdir(parents=True, exist_ok=True)
 
 
 # Create logger
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(name)-17s] - %(levelname)-7s %(message)s")
-logger = logging.getLogger("pyRADIATE")
+logger = logging.getLogger("pyRadiate")
