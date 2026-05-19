@@ -44,7 +44,7 @@ def get_latest_archive_date():
     try:
         return datetime.date.fromisoformat(latest_date)
     except ValueError as e:
-        logger.warning("Could not determine date of latest ENSDF archive.")
+        logger.warning(f"Could not determine date of latest ENSDF archive: {e!r}")
         return None
 
 

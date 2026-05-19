@@ -10,3 +10,5 @@
 .venv/
 # macOS stuff
 .DS_Store
+# pip build
+build/
