@@ -78,7 +78,7 @@ def download_ensdf_archive(archive_date, archive_file=ensdf_file, chunk_size=512
                 archive_local.write(chunk)
                 pbar.update(len(chunk))
 
-        assert archive_file.stat().size == archive_n_bytes, "Size of local and remote ENSDF archives differ"
+        assert archive_file.stat().st_size == archive_n_bytes, "Size of local and remote ENSDF archives differ"
 
     # Write ENSDF archive config file
     if archive_file == ensdf_file:

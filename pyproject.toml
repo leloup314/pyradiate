@@ -51,7 +51,8 @@ classifiers = [
 
 [project.optional-dependencies]
 test = [
-  "pytest"
+  "pytest",
+  "pytest-dependency"
 ]
 
 [project.scripts]
