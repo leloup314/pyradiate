@@ -3,6 +3,8 @@ import pytest
 import random
 import zipfile
 from pathlib import Path
+
+import pyradiate
 from pyradiate.tools import ensdf_lib_updater
 
 ENSDF_ARCHIVE_TEST_DATE = datetime.date(2026, 5, 1)
@@ -65,3 +67,7 @@ def test_unpacking_archive_fails_if_file_missing(ensdf_file, archive_path, sessi
     with pytest.raises(RuntimeWarning):
         ensdf_lib_updater.unpack_endsf_archive(archive_file=bad_ensdf_file, archive_path=archive_path)
     assert not archive_path.exists()
+
+
+def test_update_ensdf():
+    ensdf_lib_updater.update_ensdf()
