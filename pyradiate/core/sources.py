@@ -1,4 +1,5 @@
 from pyradiate.core.elements import Elements
+from pyradiate.core.errors import NuclidIdentifierError
 from pyradiate.physics import decay_constant
 
 
@@ -9,10 +10,19 @@ class RadioNuclide:
 
     @classmethod
     def from_identifier(cls, identifier: str, **kwargs):
-        symbol = "".join([c for c in identifier if c.isalpha()])
+        # Extract exact element symbol from very permissive identifier string
+        symbol = [c for c in identifier if c.isalpha()]
+        symbol = "".join([c.upper() if i == 0 else c.lower() for i, c in enumerate(symbol)])
         mass_number = int("".join([c for c in identifier if c.isdigit()]))
 
-        assert 1 <= len(symbol) <= 2, f"Symbol length must be minmum 1 character, maximum 2, is {len(symbol)}"
+        error_str = ""
+        if not 0 < len(symbol) < 3:
+            error_str = f"Identifier {identifier} results in invalid element symbol {symbol}"
+        elif not hasattr(Elements, symbol):
+            error_str = f"Symbol {symbol} not an element"
+        if error_str:
+            raise NuclidIdentifierError(error_str)
+
         return cls(Elements[symbol].atomic_number, mass_number, **kwargs)
 
     @property

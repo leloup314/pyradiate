@@ -1,0 +1,2 @@
+class NuclidIdentifierError(Exception):
+    pass
