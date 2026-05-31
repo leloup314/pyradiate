@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator
 
 # Half-life unit multipliers to seconds (ENSDF field T)
 _HALFLIFE_TO_SECONDS = {
@@ -27,13 +27,11 @@ _HALFLIFE_TO_SECONDS = {
     "MY": 31557600e6,
 }
 
-# Dataset titles like "89SE B- DECAY (0.43 S)" or "288FL A DECAY (0.64 S)"
 _DECAY_DATASET_RE = re.compile(
     r"^\s*(\S{1,5})\s{4,}(.+?\b([A-Z][A-Z0-9+\-]*)\s+DECAY\b.*?)\s{2,}\S",
     re.IGNORECASE,
 )
 
-# Parent / mode from title: "89ZR EC DECAY"
 _DECAY_MODE_RE = re.compile(
     r"^(\d+\w*)\s+((?:B[+-]|EC|A|IT|SF|EP|B-N|B\+N|B-2N|B-3N|B\+EC|B\+A|"
     r"B-EC|B\+B-|B-DECAY|B\+B\+|B\+A|B\+N|B\+P|B\+EC\+A|"
@@ -41,82 +39,65 @@ _DECAY_MODE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Continuation lines with branching: %B-=100$ %EC=50
 _BRANCH_RE = re.compile(r"%([A-Z][A-Z0-9+\-]*)=([^\s$%]+)")
 
-# Numeric token: value, optional uncertainty, optional unit / qualifier
-_NUM_RE = re.compile(
-    r"^([<>]?\s*\d+\.?\d*(?:[Ee][+-]?\d+)?|AP|SY|STABLE|UNSTABLE|"
-    r"\d+\.\d+\+\d+-\d+|\d+\+\d+-\d+)"
-    r"(?:\s+([A-Z][A-Z0-9+\-]*|\d+))?"
-    r"(?:\s+([A-Z]{1,3}|SY|AP))?",
-    re.IGNORECASE,
-)
-
-_RADIATION_RECORDS = frozenset({"G", "B", "A", "E"})
+_RADIATION_RECORDS = frozenset({"G", "B", "A"})
 
 
 @dataclass(frozen=True)
-class Radiation:
-    """Alpha, beta, or gamma line from an ENSDF decay dataset."""
+class AlphaRay:
+    """Alpha particle with a parsed energy (ENSDF A record, field E)."""
 
-    kind: str  # "alpha", "beta", "gamma"
-    energy_kev: Optional[float]
-    intensity: Optional[float]
-    energy_uncertainty_kev: Optional[float] = None
-    intensity_uncertainty: Optional[float] = None
-    raw_energy: Optional[str] = None
-    raw_intensity: Optional[str] = None
+    energy_kev: float
 
 
-@dataclass
+@dataclass(frozen=True)
+class GammaRay:
+    """Gamma transition with energy and intensity (ENSDF G record, E + RI/TI)."""
+
+    energy_kev: float
+    intensity: float
+
+
+@dataclass(frozen=True)
+class BetaRay:
+    """Beta transition with energy and branch intensity (ENSDF B record, E + IB)."""
+
+    energy_kev: float
+    intensity: float
+
+
+@dataclass(frozen=True)
 class DecayMode:
-    """One decay pathway (e.g. EC decay of 89Zr)."""
+    """One evaluated decay pathway (e.g. EC decay of 89Zr)."""
 
     mode: str
     dataset_id: str
     daughter_nuclide: str
-    half_life_s: Optional[float]
-    branches: dict[str, float] = field(default_factory=dict)
-    _alphas: list[Radiation] = field(default_factory=list)
-    _betas: list[Radiation] = field(default_factory=list)
-    _gammas: list[Radiation] = field(default_factory=list)
+    half_life_s: float
+    branches: tuple[tuple[str, float], ...]
+    alphas: tuple[AlphaRay, ...]
+    betas: tuple[BetaRay, ...]
+    gammas: tuple[GammaRay, ...]
 
-    @property
-    def alphas(self) -> tuple[Radiation, ...]:
-        return tuple(self._alphas)
-
-    @property
-    def betas(self) -> tuple[Radiation, ...]:
-        return tuple(self._betas)
-
-    @property
-    def gammas(self) -> tuple[Radiation, ...]:
-        return tuple(self._gammas)
-
-    def __iter__(self) -> Iterator[Radiation]:
-        """Iterate all radiation (alphas, then betas, then gammas)."""
-        yield from self._alphas
-        yield from self._betas
-        yield from self._gammas
+    def __iter__(self) -> Iterator[AlphaRay | BetaRay | GammaRay]:
+        yield from self.alphas
+        yield from self.betas
+        yield from self.gammas
 
 
-@dataclass
+@dataclass(frozen=True)
 class Radionuclide:
     """Radionuclide with one or more evaluated decay modes."""
 
     nuclide_id: str
     mass_number: int
     symbol: str
-    half_life_s: Optional[float] = None
-    _modes: list[DecayMode] = field(default_factory=list)
-
-    @property
-    def decay_modes(self) -> tuple[DecayMode, ...]:
-        return tuple(self._modes)
+    half_life_s: float
+    decay_modes: tuple[DecayMode, ...]
 
     def __iter__(self) -> Iterator[DecayMode]:
-        yield from self._modes
+        yield from self.decay_modes
 
 
 def _pad80(line: str) -> str:
@@ -128,150 +109,129 @@ def _slice(line: str, start: int, end: int) -> str:
     return line[start - 1 : end].strip()
 
 
-def _parse_numeric_field(text: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
-    """Parse an ENSDF numeric field (energy, intensity, half-life fragment)."""
+def _parse_value(text: str) -> float | None:
+    """Parse a single ENSDF numeric value; return None if not available."""
     if not text:
-        return None, None, None
+        return None
     raw = text.strip()
     upper = raw.upper()
-    if upper in ("", "?", "UNKNOWN") or "STABLE" in upper:
-        return None, None, raw
+    if upper in ("", "?", "UNKNOWN", "AP", "SY") or "STABLE" in upper:
+        return None
 
-    # Strip trailing qualifiers on the line (coincidence flags etc.)
-    token = raw.split()[0] if raw.split() else ""
+    token = raw.split()[0].lstrip("<>")
     if token.upper() in ("?", "AP", "SY"):
-        return None, None, raw
+        return None
 
-    # Asymmetric uncertainty: 108+20-14
     m = re.match(r"^(\d+\.?\d*(?:[Ee][+-]?\d+)?)\+(\d+)-(\d+)$", token.replace(" ", ""))
     if m:
-        return float(m.group(1)), float(m.group(2)), raw
+        return float(m.group(1))
 
     parts = raw.split()
     value_s = parts[0].lstrip("<>")
     try:
         value = float(value_s)
     except ValueError:
-        return None, None, raw
+        return None
 
-    uncertainty = None
-    if len(parts) >= 2:
-        try:
-            uncertainty = float(parts[1])
-        except ValueError:
-            pass
-
-    # Energy multiplier suffix glued to number (e.g. 9.21E3)
     if len(parts) >= 2 and parts[1].upper() in ("E2", "E3", "E4", "E5", "E6"):
-        exp = int(parts[1][1])
-        value *= 10**exp
+        value *= 10 ** int(parts[1][1])
 
-    return value, uncertainty, raw
+    return value
 
 
-def _parse_halflife(text: str) -> Optional[float]:
+def _parse_energy(line: str) -> float | None:
+    """Cols 10-19 (E), including E2/E3 multipliers."""
+    e_text = _slice(line, 10, 19)
+    value = _parse_value(e_text)
+    if value is not None and e_text:
+        m = re.search(r"E(\d)\s*$", e_text, re.IGNORECASE)
+        if m:
+            value *= 10 ** int(m.group(1))
+    return value
+
+
+def _parse_intensity(line: str, record: str) -> float | None:
+    """IB (beta/alpha) cols 22-29; RI or TI for gamma."""
+    if record == "G":
+        text = _slice(line, 22, 29) or _slice(line, 65, 74)
+    else:
+        text = _slice(line, 22, 29)
+    return _parse_value(text)
+
+
+def _parse_halflife(text: str) -> float | None:
     """Convert ENSDF half-life field (cols 40-49) to seconds."""
-    if not text:
-        return None
-    raw = text.strip()
-    if "STABLE" in raw.upper():
+    if not text or "STABLE" in text.upper():
         return None
 
-    parts = raw.split()
-    if not parts:
-        return None
-
-    # Find unit token (last alphabetic token)
+    parts = text.split()
     unit = None
     value_parts: list[str] = []
     for p in parts:
-        pu = p.upper().rstrip("0123456789")
+        pu = p.upper()
         if pu in _HALFLIFE_TO_SECONDS:
             unit = pu
-        elif re.match(r"^[A-Z]{1,3}$", p.upper()) and p.upper() in _HALFLIFE_TO_SECONDS:
-            unit = p.upper()
         else:
             value_parts.append(p)
 
     if not value_parts:
         return None
 
-    value, _, _ = _parse_numeric_field(" ".join(value_parts[:2]))
+    value = _parse_value(" ".join(value_parts[:2]))
     if value is None:
         return None
-
     if unit is None:
-        # Bare number — assume seconds if no unit (unusual)
         return value
-
     return value * _HALFLIFE_TO_SECONDS[unit]
 
 
-def _parse_energy(line: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
-    """Cols 10-19 (E), 20-21 (DE)."""
-    e_text = _slice(line, 10, 19)
-    de_text = _slice(line, 20, 21)
-    value, unc, raw = _parse_numeric_field(e_text)
-
-    # E3-style multiplier in column 19
-    if e_text and value is not None:
-        m = re.search(r"E(\d)\s*$", e_text, re.IGNORECASE)
-        if m:
-            value *= 10 ** int(m.group(1))
-
-    if value is not None and de_text:
-        try:
-            de = float(de_text)
-            # ENSDF uncertainty applies to last digits
-            if de < value:
-                unc = de
-        except ValueError:
-            pass
-
-    return value, unc, raw or e_text or None
+def _parse_alpha(line: str) -> AlphaRay | None:
+    energy = _parse_energy(line)
+    if energy is None:
+        return None
+    return AlphaRay(energy_kev=energy)
 
 
-def _parse_intensity(line: str, record: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
-    """IB (beta/alpha) cols 22-29; RI/TI for gamma."""
-    if record == "G":
-        ri = _slice(line, 22, 29)
-        ti = _slice(line, 65, 74)
-        text = ri or ti
-    else:
-        text = _slice(line, 22, 29)
-    return _parse_numeric_field(text)
+def _parse_gamma(line: str) -> GammaRay | None:
+    energy = _parse_energy(line)
+    intensity = _parse_intensity(line, "G")
+    if energy is None or intensity is None:
+        return None
+    return GammaRay(energy_kev=energy, intensity=intensity)
 
 
-def _record_type(line: str) -> Optional[str]:
+def _parse_beta(line: str) -> BetaRay | None:
+    energy = _parse_energy(line)
+    intensity = _parse_intensity(line, "B")
+    if energy is None or intensity is None:
+        return None
+    return BetaRay(energy_kev=energy, intensity=intensity)
+
+
+def _record_type(line: str) -> str | None:
     """Return ENSDF record letter in column 8, or None for comments / supplementals."""
     line = _pad80(line)
     if len(line) < 8:
         return None
-    # Comment record: col 7 (index 6) is 'c'
     if line[6] == "c":
         return None
-    # Supplemental / non-body records (col 6)
     if line[5] in "SHNQDCRdtx":
         return None
     rtype = line[7]
-    if not rtype.isalpha():
-        return None
-    if rtype in "SHNQDCRdtx":
+    if not rtype.isalpha() or rtype in "SHNQDCRdtx":
         return None
     return rtype
 
 
 def _is_dataset_header(line: str) -> bool:
-    """Identification record: col 8 blank, cols 6-7 blank."""
     line = _pad80(line)
     return line[5:7] == "  " and line[7] == " "
 
 
-def _extract_decay_mode_from_title(title: str) -> Optional[str]:
+def _extract_decay_mode_from_title(title: str) -> str | None:
     m = _DECAY_MODE_RE.search(title.strip())
     if m:
         return m.group(2).upper().replace(" ", " ")
-    # Fallback: token before DECAY
     m2 = re.search(r"(\S+)\s+DECAY", title, re.IGNORECASE)
     return m2.group(1).upper() if m2 else None
 
@@ -285,10 +245,9 @@ def _parse_nuclide_id(nucid: str) -> tuple[int, str]:
 
 
 def _split_datasets(lines: list[str]) -> list[tuple[str, str, list[str]]]:
-    """Return (daughter_nucid, dataset_title, body_lines)."""
     datasets: list[tuple[str, str, list[str]]] = []
-    current_title: Optional[str] = None
-    current_daughter: Optional[str] = None
+    current_title: str | None = None
+    current_daughter: str | None = None
     current_body: list[str] = []
 
     def flush() -> None:
@@ -307,14 +266,9 @@ def _split_datasets(lines: list[str]) -> list[tuple[str, str, list[str]]]:
                 current_daughter = m.group(1).strip()
                 current_title = m.group(2).strip()
                 current_body = []
-                continue
-            # Non-decay dataset header ends previous decay dataset
-            if current_title and " DECAY" in current_title.upper():
-                flush()
             else:
                 flush()
             continue
-
         if current_title is not None:
             current_body.append(line)
 
@@ -324,17 +278,17 @@ def _split_datasets(lines: list[str]) -> list[tuple[str, str, list[str]]]:
 
 def _parse_decay_dataset(
     daughter: str, title: str, lines: list[str]
-) -> Optional[tuple[str, DecayMode]]:
+) -> tuple[str, DecayMode] | None:
     if " DECAY" not in title.upper():
         return None
 
     mode_label = _extract_decay_mode_from_title(title) or "DECAY"
-    parent_id: Optional[str] = None
-    half_life_s: Optional[float] = None
-    branches: dict[str, float] = {}
-    alphas: list[Radiation] = []
-    betas: list[Radiation] = []
-    gammas: list[Radiation] = []
+    parent_id: str | None = None
+    half_life_s: float | None = None
+    branch_items: list[tuple[str, float]] = []
+    alphas: list[AlphaRay] = []
+    betas: list[BetaRay] = []
+    gammas: list[GammaRay] = []
 
     for line in lines:
         line = _pad80(line.rstrip("\n"))
@@ -342,62 +296,37 @@ def _parse_decay_dataset(
         if rtype is None:
             continue
 
-        nucid = _slice(line, 1, 5)
-
         if rtype == "P":
             if line[5] != " " or line[6] != " ":
                 continue
-            parent_id = nucid
-            t_field = _slice(line, 40, 49)
-            hl = _parse_halflife(t_field)
+            parent_id = _slice(line, 1, 5)
+            hl = _parse_halflife(_slice(line, 40, 49))
             if hl is not None:
                 half_life_s = hl
         elif rtype == "L":
-            # Branching fractions on continuation L records
-            cont = line[5] if len(line) > 5 else " "
-            if cont not in (" ", ""):
+            if line[5] not in (" ", ""):
                 text = line[9:].strip() if len(line) > 9 else ""
                 for bm, val in _BRANCH_RE.findall(text):
-                    v, _, _ = _parse_numeric_field(val.replace("$", ""))
+                    v = _parse_value(val.replace("$", ""))
                     if v is not None:
-                        branches[bm.upper()] = v
+                        branch_items.append((bm.upper(), v))
         elif rtype in _RADIATION_RECORDS:
-            # Only standard data records: cols 6-7 blank
             if line[5] != " " or line[6] != " ":
                 continue
-            energy, e_unc, raw_e = _parse_energy(line)
-            intensity, i_unc, raw_i = _parse_intensity(line, rtype)
-
-            if energy is None and intensity is None:
-                continue
-
-            if rtype == "G":
-                kind = "gamma"
-            elif rtype == "A":
-                kind = "alpha"
+            if rtype == "A":
+                alpha = _parse_alpha(line)
+                if alpha is not None:
+                    alphas.append(alpha)
+            elif rtype == "G":
+                gamma = _parse_gamma(line)
+                if gamma is not None:
+                    gammas.append(gamma)
             elif rtype == "B":
-                kind = "beta"
-            else:
-                continue
-
-            rad = Radiation(
-                kind=kind,
-                energy_kev=energy,
-                intensity=intensity,
-                energy_uncertainty_kev=e_unc,
-                intensity_uncertainty=i_unc,
-                raw_energy=raw_e,
-                raw_intensity=raw_i,
-            )
-            if kind == "alpha":
-                alphas.append(rad)
-            elif kind == "beta":
-                betas.append(rad)
-            else:
-                gammas.append(rad)
+                beta = _parse_beta(line)
+                if beta is not None:
+                    betas.append(beta)
 
     if parent_id is None:
-        # Infer parent from title (first token before mode)
         m = _DECAY_MODE_RE.match(title.strip())
         if m:
             parent_id = m.group(1).upper()
@@ -405,34 +334,36 @@ def _parse_decay_dataset(
             return None
 
     if half_life_s is None:
-        m = re.search(r"\(([^)]+)\)\s*$", title)
+        m = re.search(r"\(([^)]+)\)", title)
         if m:
             half_life_s = _parse_halflife(m.group(1))
 
-    decay = DecayMode(
+    if half_life_s is None:
+        return None
+
+    return parent_id.strip(), DecayMode(
         mode=mode_label,
         dataset_id=title,
         daughter_nuclide=daughter.strip(),
         half_life_s=half_life_s,
-        branches=branches,
+        branches=tuple(branch_items),
+        alphas=tuple(alphas),
+        betas=tuple(betas),
+        gammas=tuple(gammas),
     )
-    decay._alphas = alphas
-    decay._betas = betas
-    decay._gammas = gammas
-    return parent_id.strip(), decay
 
 
 def parse_ensdf_file(path: str | Path) -> dict[str, Radionuclide]:
     """
     Parse one ENSDF mass file and return radionuclides keyed by NUCID.
 
-    Only decay datasets (with a parent record) are included.
+    Only decay datasets with a parseable half-life are included.
+    Radiation records are kept only when all required fields for their type parse.
     """
     path = Path(path)
-    text = path.read_text(encoding="utf-8", errors="replace")
-    lines = text.splitlines()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
 
-    nuclides: dict[str, Radionuclide] = {}
+    pending: dict[str, list[DecayMode]] = {}
 
     for daughter, title, body in _split_datasets(lines):
         if " DECAY" not in title.upper():
@@ -441,43 +372,44 @@ def parse_ensdf_file(path: str | Path) -> dict[str, Radionuclide]:
         if parsed is None:
             continue
         parent_id, mode = parsed
+        pending.setdefault(parent_id, []).append(mode)
 
-        if parent_id not in nuclides:
-            a, sym = _parse_nuclide_id(parent_id)
-            nuclides[parent_id] = Radionuclide(
-                nuclide_id=parent_id,
-                mass_number=a,
-                symbol=sym,
-            )
-
-        nuc = nuclides[parent_id]
-        nuc._modes.append(mode)
-        if mode.half_life_s is not None and nuc.half_life_s is None:
-            nuc.half_life_s = mode.half_life_s
-
+    nuclides: dict[str, Radionuclide] = {}
+    for parent_id, modes in pending.items():
+        a, sym = _parse_nuclide_id(parent_id)
+        nuclides[parent_id] = Radionuclide(
+            nuclide_id=parent_id,
+            mass_number=a,
+            symbol=sym,
+            half_life_s=modes[0].half_life_s,
+            decay_modes=tuple(modes),
+        )
     return nuclides
 
 
 def parse_ensdf_directory(path: str | Path) -> dict[str, Radionuclide]:
     """Parse all ensdf.* files in a directory."""
     path = Path(path)
-    merged: dict[str, Radionuclide] = {}
+    merged_modes: dict[str, list[DecayMode]] = {}
     for fp in sorted(path.glob("ensdf.*")):
         for nid, nuc in parse_ensdf_file(fp).items():
-            if nid in merged:
-                merged[nid]._modes.extend(nuc._modes)
-                if merged[nid].half_life_s is None:
-                    merged[nid].half_life_s = nuc.half_life_s
-            else:
-                merged[nid] = nuc
-    return merged
+            merged_modes.setdefault(nid, []).extend(nuc.decay_modes)
+
+    return {
+        nid: Radionuclide(
+            nuclide_id=nid,
+            mass_number=_parse_nuclide_id(nid)[0],
+            symbol=_parse_nuclide_id(nid)[1],
+            half_life_s=modes[0].half_life_s,
+            decay_modes=tuple(modes),
+        )
+        for nid, modes in merged_modes.items()
+        if modes
+    }
 
 
 def iter_radionuclides(path: str | Path) -> Iterator[Radionuclide]:
     """Iterate all radionuclides from a file or directory."""
     path = Path(path)
-    if path.is_dir():
-        data = parse_ensdf_directory(path)
-    else:
-        data = parse_ensdf_file(path)
+    data = parse_ensdf_directory(path) if path.is_dir() else parse_ensdf_file(path)
     yield from data.values()
