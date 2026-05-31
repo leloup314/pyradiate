@@ -43,6 +43,24 @@ _BRANCH_RE = re.compile(r"%([A-Z][A-Z0-9+\-]*)=([^\s$%]+)")
 
 _RADIATION_RECORDS = frozenset({"G", "B", "A"})
 
+# tG table rows: "102.024 {I20}    23.2 {I14}  K|a{-2}| x ray"
+_ENSDF_TABLE_NUMBER = re.compile(
+    r"(\d+\.?\d*(?:[Ee][+-]?\d+)?)\s*(?:\{I[^}]+\})?"
+)
+
+_XRAY_BLOCK_START = re.compile(
+    r"x\s*ray|x-ray",
+    re.IGNORECASE,
+)
+_XRAY_BLOCK_END = re.compile(
+    r"^\$[-=]{3,}|^\$Other |\|g-ray intensities|^\|a\|g|\|a\(|coincidence data",
+    re.IGNORECASE,
+)
+_XRAY_SKIP_LINE = re.compile(
+    r"^E\(x[- ]?ray\)|^I\(x[- ]?ray\)|^-{3,}|^\(\% per|intensity\s*$|^\s*energy\s*$",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class AlphaRay:
@@ -68,6 +86,15 @@ class BetaRay:
 
 
 @dataclass(frozen=True)
+class XRay:
+    """Atomic X-ray from an ENSDF tG table (energy, intensity, shell line label)."""
+
+    energy_kev: float
+    intensity: float
+    label: str
+
+
+@dataclass(frozen=True)
 class DecayMode:
     """One evaluated decay pathway (e.g. EC decay of 89Zr)."""
 
@@ -79,11 +106,13 @@ class DecayMode:
     alphas: tuple[AlphaRay, ...]
     betas: tuple[BetaRay, ...]
     gammas: tuple[GammaRay, ...]
+    xrays: tuple[XRay, ...]
 
-    def __iter__(self) -> Iterator[AlphaRay | BetaRay | GammaRay]:
+    def __iter__(self) -> Iterator[AlphaRay | BetaRay | GammaRay | XRay]:
         yield from self.alphas
         yield from self.betas
         yield from self.gammas
+        yield from self.xrays
 
 
 @dataclass(frozen=True)
@@ -208,6 +237,151 @@ def _parse_beta(line: str) -> BetaRay | None:
     return BetaRay(energy_kev=energy, intensity=intensity)
 
 
+def _is_tg_line(line: str) -> bool:
+    line = _pad80(line)
+    return len(line) >= 8 and line[6] == "t" and line[7] == "G"
+
+
+def _tg_body(line: str) -> str:
+    return line[8:].strip()
+
+
+def _table_numeric_region(body: str) -> str:
+    """Limit number parsing to the table columns, not shell labels like K|b{-3}."""
+    m = re.search(r"\s[KLMNO]\|", body)
+    if m:
+        return body[: m.start()]
+    m = re.search(r"x\s*ray", body, re.I)
+    if m:
+        return body[: m.start()]
+    return body[:50]
+
+
+def _parse_table_number_spans(body: str) -> list[tuple[float, int, int]]:
+    """Return (value, start, end) for each ENSDF number token in a tG row."""
+    region = _table_numeric_region(body)
+    spans: list[tuple[float, int, int]] = []
+    for m in _ENSDF_TABLE_NUMBER.finditer(region):
+        v = _parse_value(m.group(1))
+        if v is not None:
+            spans.append((v, m.start(), m.end()))
+    return spans
+
+
+def _extract_xray_label(body: str) -> str:
+    cleaned = re.sub(r"\{I[^}]+\}", "", body).replace("$", "")
+    shell = re.search(
+        r"(?:K\|[^+\s]+|L\|[^+\s]+|M\|[^+\s]+|N\|[^+\s]+|K-O\{[^}]+\})"
+        r"(?:\s*\+\s*(?:K\|[^+\s]+|L\|[^+\s]+|K-O\{[^}]+\}))*"
+        r"(?:\s+x\s*ray)?",
+        cleaned,
+        re.I,
+    )
+    if shell:
+        return shell.group(0).strip()
+    if re.search(r"x\s*ray", cleaned, re.I):
+        return "x ray"
+    return ""
+
+
+def _tg_starts_xray_block(body: str) -> bool:
+    if _XRAY_BLOCK_END.search(body):
+        return False
+    if body.startswith("$") and _XRAY_BLOCK_START.search(body):
+        return True
+    if re.search(r"E\(x[- ]?ray\)\s+I\(x[- ]?ray\)", body, re.I):
+        return True
+    if re.search(r"x\s*ray.*measured|measured.*x\s*ray", body, re.I):
+        return True
+    return False
+
+
+def _tg_ends_xray_block(body: str) -> bool:
+    return bool(_XRAY_BLOCK_END.search(body))
+
+
+def _parse_tg_xray_rows(lines: list[str]) -> list[XRay]:
+    """Parse X-ray lines from tG table blocks inside a decay dataset."""
+    xrays: list[XRay] = []
+    in_block = False
+    pending_energy: float | None = None
+    pending_label = ""
+
+    for line in lines:
+        if not _is_tg_line(line):
+            if in_block:
+                in_block = False
+                pending_energy = None
+            continue
+
+        body = _tg_body(line)
+        if not body:
+            continue
+
+        if _tg_ends_xray_block(body):
+            in_block = False
+            pending_energy = None
+            continue
+
+        if _tg_starts_xray_block(body):
+            in_block = True
+            pending_energy = None
+            continue
+
+        if not in_block:
+            continue
+
+        if _XRAY_SKIP_LINE.search(body) or body.startswith("("):
+            continue
+        if set(body) <= {"-", " "}:
+            continue
+
+        spans = _parse_table_number_spans(body)
+        values = [s[0] for s in spans]
+
+        if len(spans) >= 2:
+            label = _extract_xray_label(body)
+            if not label:
+                label = "x ray"
+            xrays.append(
+                XRay(
+                    energy_kev=spans[0][0],
+                    intensity=spans[1][0],
+                    label=label,
+                )
+            )
+            pending_energy = None
+            continue
+
+        if len(spans) == 1 and pending_energy is not None:
+            value = spans[0][0]
+            label = _extract_xray_label(body)
+            # Continuation row: intensity only (typically much smaller than X-ray energy)
+            if value < pending_energy:
+                xrays.append(
+                    XRay(
+                        energy_kev=pending_energy,
+                        intensity=value,
+                        label=label or pending_label or "x ray",
+                    )
+                )
+                pending_energy = None
+                pending_label = ""
+            elif label:
+                pending_energy = value
+                pending_label = label
+            continue
+
+        if len(spans) == 1 and pending_energy is None:
+            label = _extract_xray_label(body)
+            if label:
+                pending_energy = spans[0][0]
+                pending_label = label
+            continue
+
+    return xrays
+
+
 def _record_type(line: str) -> str | None:
     """Return ENSDF record letter in column 8, or None for comments / supplementals."""
     line = _pad80(line)
@@ -289,6 +463,7 @@ def _parse_decay_dataset(
     alphas: list[AlphaRay] = []
     betas: list[BetaRay] = []
     gammas: list[GammaRay] = []
+    xrays = _parse_tg_xray_rows(lines)
 
     for line in lines:
         line = _pad80(line.rstrip("\n"))
@@ -350,6 +525,7 @@ def _parse_decay_dataset(
         alphas=tuple(alphas),
         betas=tuple(betas),
         gammas=tuple(gammas),
+        xrays=tuple(xrays),
     )
 
 
