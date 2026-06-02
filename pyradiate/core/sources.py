@@ -1,5 +1,7 @@
+from pyradiate.tools.ensdf_decay_parser import parse_radio_nuclide
 from pyradiate.core.elements import Elements
-from pyradiate.core.errors import NuclidIdentifierError
+from pyradiate.core.nuclide import NuclideIdentifier
+from pyradiate.core.radiation import Decay
 from pyradiate.physics import decay_constant
 
 
@@ -9,49 +11,53 @@ class RadioNuclide:
     """
 
     @classmethod
-    def from_identifier(cls, identifier: str, **kwargs):
-        # Extract exact element symbol from very permissive identifier string
-        symbol = [c for c in identifier if c.isalpha()]
-        symbol = "".join([c.upper() if i == 0 else c.lower() for i, c in enumerate(symbol)])
-        mass_number = int("".join([c for c in identifier if c.isdigit()]))
+    def from_string(cls, nuclid_string: str, **kwargs):
+        nuclid_id = NuclideIdentifier.from_string(nuclid_string)
+        return cls.from_identifier(nuclid_identifier=nuclid_id)
 
-        error_str = ""
-        if not 0 < len(symbol) < 3:
-            error_str = f"Identifier {identifier} results in invalid element symbol {symbol}"
-        elif not hasattr(Elements, symbol):
-            error_str = f"Symbol {symbol} not an element"
-        if error_str:
-            raise NuclidIdentifierError(error_str)
+    @classmethod
+    def from_identifier(cls, nuclid_identifier: NuclideIdentifier, **kwargs):
+        return cls(mass_number=nuclid_identifier.mass_number, element=nuclid_identifier.element, **kwargs)
 
-        return cls(Elements[symbol].atomic_number, mass_number, **kwargs)
+    @property
+    def identifier(self) -> NuclideIdentifier:
+        return self._nuclide_identifier
 
     @property
     def atomic_number(self) -> int:
-        return self._atomic_number
+        return self.identifier.element.atomic_number
 
     @property
     def mass_number(self) -> int:
-        return self._mass_number
+        return self.identifier.mass_number
 
     @property
     def element(self) -> Elements:
-        return self._element
+        return self.identifier.element
 
     @property
     def half_life(self) -> float:
-        return None
+        return self.decays[0].half_life_s
+
+    @property
+    def decays(self) -> list[Decay]:
+        return self._decays
 
     @property
     def decay_constant(self) -> float:
         return decay_constant(self.half_life)
 
-    def __init__(self, atomic_number: int, mass_number: int, activity: float | None = None):
-        self._mass_number = mass_number
-        self._atomic_number = atomic_number
-        self._element = Elements.from_atomic_number(atomic_number)
-
+    def __init__(self, mass_number: int, element: Elements, activity: float | None = None):
+        self._nuclide_identifier = NuclideIdentifier(mass_number=mass_number, element=element)
+        self._decays = parse_radio_nuclide(self._nuclide_identifier)
         # Accesible attributes
         self.activity = activity
+
+    def __iter__(self):
+        yield from self.decays
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}[{self.identifier.identifier}, decay_modes={len(self.decays)})"
 
 
 class Source:
