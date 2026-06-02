@@ -1,11 +1,12 @@
 """Minimal parser for ENSDF decay datasets."""
 
-from __future__ import annotations
-
 import re
-from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
-from typing import Iterator
+
+from pyradiate import ensdf_path
+from pyradiate.core import radiation
+from pyradiate.core.nuclide import NuclideIdentifier, NuclideIdentifierError
 
 # Half-life unit multipliers to seconds (ENSDF field T)
 _HALFLIFE_TO_SECONDS = {
@@ -33,9 +34,18 @@ _DECAY_DATASET_RE = re.compile(
 )
 
 _DECAY_MODE_RE = re.compile(
-    r"^(\d+\w*)\s+((?:B[+-]|EC|A|IT|SF|EP|B-N|B\+N|B-2N|B-3N|B\+EC|B\+A|"
-    r"B-EC|B\+B-|B-DECAY|B\+B\+|B\+A|B\+N|B\+P|B\+EC\+A|"
-    r"EC\+B\+|EC\+A|A\+EC|A\+B\+|A\+B-|A\+EC\+B\+)\s+DECAY)",
+    r"^(\d+\w*)\s+("
+    + r"(?:"
+    + r"B[+-]|EC|A|IT|SF|EP|"
+    + r"B-N|B\+N|B-2N|B-3N|"
+    + r"B\+EC|B\+A|B-EC|"
+    + r"B\+B-|B\+B\+|"
+    + r"B\+P|"
+    + r"B\+EC\+A|"
+    + r"EC\+B\+|EC\+A|"
+    + r"A\+EC|A\+B\+|A\+B-|A\+EC\+B\+"
+    + r")\s+DECAY"
+    + r")",
     re.IGNORECASE,
 )
 
@@ -44,9 +54,7 @@ _BRANCH_RE = re.compile(r"%([A-Z][A-Z0-9+\-]*)=([^\s$%]+)")
 _RADIATION_RECORDS = frozenset({"G", "B", "A"})
 
 # tG table rows: "102.024 {I20}    23.2 {I14}  K|a{-2}| x ray"
-_ENSDF_TABLE_NUMBER = re.compile(
-    r"(\d+\.?\d*(?:[Ee][+-]?\d+)?)\s*(?:\{I[^}]+\})?"
-)
+_ENSDF_TABLE_NUMBER = re.compile(r"(\d+\.?\d*(?:[Ee][+-]?\d+)?)\s*(?:\{I[^}]+\})?")
 
 _XRAY_BLOCK_START = re.compile(
     r"x\s*ray|x-ray",
@@ -60,73 +68,6 @@ _XRAY_SKIP_LINE = re.compile(
     r"^E\(x[- ]?ray\)|^I\(x[- ]?ray\)|^-{3,}|^\(\% per|intensity\s*$|^\s*energy\s*$",
     re.IGNORECASE,
 )
-
-
-@dataclass(frozen=True)
-class AlphaRay:
-    """Alpha particle with a parsed energy (ENSDF A record, field E)."""
-
-    energy_kev: float
-
-
-@dataclass(frozen=True)
-class GammaRay:
-    """Gamma transition with energy and intensity (ENSDF G record, E + RI/TI)."""
-
-    energy_kev: float
-    intensity: float
-
-
-@dataclass(frozen=True)
-class BetaRay:
-    """Beta transition with energy and branch intensity (ENSDF B record, E + IB)."""
-
-    energy_kev: float
-    intensity: float
-
-
-@dataclass(frozen=True)
-class XRay:
-    """Atomic X-ray from an ENSDF tG table (energy, intensity, shell line label)."""
-
-    energy_kev: float
-    intensity: float
-    label: str
-
-
-@dataclass(frozen=True)
-class DecayMode:
-    """One evaluated decay pathway (e.g. EC decay of 89Zr)."""
-
-    mode: str
-    dataset_id: str
-    daughter_nuclide: str
-    half_life_s: float
-    branches: tuple[tuple[str, float], ...]
-    alphas: tuple[AlphaRay, ...]
-    betas: tuple[BetaRay, ...]
-    gammas: tuple[GammaRay, ...]
-    xrays: tuple[XRay, ...]
-
-    def __iter__(self) -> Iterator[AlphaRay | BetaRay | GammaRay | XRay]:
-        yield from self.alphas
-        yield from self.betas
-        yield from self.gammas
-        yield from self.xrays
-
-
-@dataclass(frozen=True)
-class Radionuclide:
-    """Radionuclide with one or more evaluated decay modes."""
-
-    nuclide_id: str
-    mass_number: int
-    symbol: str
-    half_life_s: float
-    decay_modes: tuple[DecayMode, ...]
-
-    def __iter__(self) -> Iterator[DecayMode]:
-        yield from self.decay_modes
 
 
 def _pad80(line: str) -> str:
@@ -214,27 +155,27 @@ def _parse_halflife(text: str) -> float | None:
     return value * _HALFLIFE_TO_SECONDS[unit]
 
 
-def _parse_alpha(line: str) -> AlphaRay | None:
+def _parse_alpha(line: str) -> radiation.Alpha | None:
     energy = _parse_energy(line)
     if energy is None:
         return None
-    return AlphaRay(energy_kev=energy)
+    return radiation.Alpha(energy_kev=energy)
 
 
-def _parse_gamma(line: str) -> GammaRay | None:
+def _parse_gamma(line: str) -> radiation.Gamma | None:
     energy = _parse_energy(line)
     intensity = _parse_intensity(line, "G")
     if energy is None or intensity is None:
         return None
-    return GammaRay(energy_kev=energy, intensity=intensity)
+    return radiation.Gamma(energy_kev=energy, intensity=intensity)
 
 
-def _parse_beta(line: str) -> BetaRay | None:
+def _parse_beta(line: str) -> radiation.Beta | None:
     energy = _parse_energy(line)
     intensity = _parse_intensity(line, "B")
     if energy is None or intensity is None:
         return None
-    return BetaRay(energy_kev=energy, intensity=intensity)
+    return radiation.Beta(energy_kev=energy, intensity=intensity)
 
 
 def _is_tg_line(line: str) -> bool:
@@ -300,9 +241,9 @@ def _tg_ends_xray_block(body: str) -> bool:
     return bool(_XRAY_BLOCK_END.search(body))
 
 
-def _parse_tg_xray_rows(lines: list[str]) -> list[XRay]:
+def _parse_tg_xray_rows(lines: list[str]) -> list[radiation.Xray]:
     """Parse X-ray lines from tG table blocks inside a decay dataset."""
-    xrays: list[XRay] = []
+    xrays: list[radiation.Xray] = []
     in_block = False
     pending_energy: float | None = None
     pending_label = ""
@@ -344,7 +285,7 @@ def _parse_tg_xray_rows(lines: list[str]) -> list[XRay]:
             if not label:
                 label = "x ray"
             xrays.append(
-                XRay(
+                radiation.Xray(
                     energy_kev=spans[0][0],
                     intensity=spans[1][0],
                     label=label,
@@ -359,7 +300,7 @@ def _parse_tg_xray_rows(lines: list[str]) -> list[XRay]:
             # Continuation row: intensity only (typically much smaller than X-ray energy)
             if value < pending_energy:
                 xrays.append(
-                    XRay(
+                    radiation.Xray(
                         energy_kev=pending_energy,
                         intensity=value,
                         label=label or pending_label or "x ray",
@@ -450,9 +391,7 @@ def _split_datasets(lines: list[str]) -> list[tuple[str, str, list[str]]]:
     return datasets
 
 
-def _parse_decay_dataset(
-    daughter: str, title: str, lines: list[str]
-) -> tuple[str, DecayMode] | None:
+def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[str, radiation.Decay] | None:
     if " DECAY" not in title.upper():
         return None
 
@@ -460,9 +399,9 @@ def _parse_decay_dataset(
     parent_id: str | None = None
     half_life_s: float | None = None
     branch_items: list[tuple[str, float]] = []
-    alphas: list[AlphaRay] = []
-    betas: list[BetaRay] = []
-    gammas: list[GammaRay] = []
+    alphas: list[radiation.Alpha] = []
+    betas: list[radiation.Beta] = []
+    gammas: list[radiation.Gamma] = []
     xrays = _parse_tg_xray_rows(lines)
 
     for line in lines:
@@ -515,21 +454,33 @@ def _parse_decay_dataset(
 
     if half_life_s is None:
         return None
+    try:
+        nuclid_identifier = NuclideIdentifier.from_string(parent_id.strip()).identifier
+        return nuclid_identifier, radiation.Decay(
+            mode=mode_label,
+            dataset_id=title,
+            daughter_nuclide=NuclideIdentifier.from_string(daughter.strip()),
+            half_life_s=half_life_s,
+            branches=tuple(branch_items),
+            alphas=tuple(alphas),
+            betas=tuple(betas),
+            gammas=tuple(gammas),
+            xrays=tuple(xrays),
+        )
+    except NuclideIdentifierError:
+        return None
 
-    return parent_id.strip(), DecayMode(
-        mode=mode_label,
-        dataset_id=title,
-        daughter_nuclide=daughter.strip(),
-        half_life_s=half_life_s,
-        branches=tuple(branch_items),
-        alphas=tuple(alphas),
-        betas=tuple(betas),
-        gammas=tuple(gammas),
-        xrays=tuple(xrays),
-    )
+
+def parse_radio_nuclide(nuclide_identifier: NuclideIdentifier) -> list[radiation.Decay]:
+    # mass_data = parse_ensdf_file(ensdf_path / f"ensdf.{nuclide_identifier.mass_number:03d}")
+    mass_data = parse_ensdf_directory(ensdf_path)
+    if nuclide_identifier.identifier not in mass_data:
+        raise NuclideIdentifierError("This does not work")
+    return mass_data[nuclide_identifier.identifier]
 
 
-def parse_ensdf_file(path: str | Path) -> dict[str, Radionuclide]:
+@cache
+def parse_ensdf_file(path: str | Path) -> dict[str, list[radiation.Decay]]:
     """
     Parse one ENSDF mass file and return radionuclides keyed by NUCID.
 
@@ -539,8 +490,7 @@ def parse_ensdf_file(path: str | Path) -> dict[str, Radionuclide]:
     path = Path(path)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
 
-    pending: dict[str, list[DecayMode]] = {}
-
+    decays = {}
     for daughter, title, body in _split_datasets(lines):
         if " DECAY" not in title.upper():
             continue
@@ -548,44 +498,18 @@ def parse_ensdf_file(path: str | Path) -> dict[str, Radionuclide]:
         if parsed is None:
             continue
         parent_id, mode = parsed
-        pending.setdefault(parent_id, []).append(mode)
+        decays.setdefault(parent_id, []).append(mode)
 
-    nuclides: dict[str, Radionuclide] = {}
-    for parent_id, modes in pending.items():
-        a, sym = _parse_nuclide_id(parent_id)
-        nuclides[parent_id] = Radionuclide(
-            nuclide_id=parent_id,
-            mass_number=a,
-            symbol=sym,
-            half_life_s=modes[0].half_life_s,
-            decay_modes=tuple(modes),
-        )
-    return nuclides
+    return decays
 
 
-def parse_ensdf_directory(path: str | Path) -> dict[str, Radionuclide]:
+def parse_ensdf_directory(path: str | Path) -> dict[str, list[radiation.Decay]]:
     """Parse all ensdf.* files in a directory."""
     path = Path(path)
-    merged_modes: dict[str, list[DecayMode]] = {}
+    decays = {}
     for fp in sorted(path.glob("ensdf.*")):
         for nid, nuc in parse_ensdf_file(fp).items():
-            merged_modes.setdefault(nid, []).extend(nuc.decay_modes)
+            if nuc:
+                decays.setdefault(nid, []).extend(nuc)
 
-    return {
-        nid: Radionuclide(
-            nuclide_id=nid,
-            mass_number=_parse_nuclide_id(nid)[0],
-            symbol=_parse_nuclide_id(nid)[1],
-            half_life_s=modes[0].half_life_s,
-            decay_modes=tuple(modes),
-        )
-        for nid, modes in merged_modes.items()
-        if modes
-    }
-
-
-def iter_radionuclides(path: str | Path) -> Iterator[Radionuclide]:
-    """Iterate all radionuclides from a file or directory."""
-    path = Path(path)
-    data = parse_ensdf_directory(path) if path.is_dir() else parse_ensdf_file(path)
-    yield from data.values()
+    return decays
