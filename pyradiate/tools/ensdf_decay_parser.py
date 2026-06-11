@@ -60,6 +60,7 @@ _BRANCH_RE = re.compile(
 )
 
 _RADIATION_RECORDS = frozenset({"G", "B", "A"})
+_BETA_AVERAGE_ENERGY_RE = re.compile(r"EAV=(\d+\.?\d*(?:[Ee][+-]?\d+)?)")
 
 # tG table rows: "102.024 {I20}    23.2 {I14}  K|a{-2}| x ray"
 _ENSDF_TABLE_NUMBER = re.compile(r"(\d+\.?\d*(?:[Ee][+-]?\d+)?)\s*(?:\{I[^}]+\})?")
@@ -178,12 +179,64 @@ def _parse_gamma(line: str) -> radiation.Gamma | None:
     return radiation.Gamma(energy_kev=energy, intensity=intensity)
 
 
-def _parse_beta(line: str) -> radiation.Beta | None:
-    energy = _parse_energy(line)
+def _beta_kind_for_decay_mode(mode: str) -> radiation.BetaKind | None:
+    key = _decay_mode_key(mode)
+    if "B-" in key:
+        return radiation.BetaKind.ELECTRON
+    if "B+" in key:
+        return radiation.BetaKind.POSITRON
+    return None
+
+
+def _parse_beta_average_energy_kev(line: str) -> float | None:
+    """ENSDF S B continuation giving average beta energy (EAV=..., keV)."""
+    line = _pad80(line)
+    if len(line) < 8 or line[5] != "S" or line[7] != "B":
+        return None
+    body = line[9:] if len(line) > 9 else ""
+    match = _BETA_AVERAGE_ENERGY_RE.search(body)
+    if match is None:
+        return None
+    return _parse_value(match.group(1))
+
+
+def _following_beta_average_energy_kev(lines: list[str], index: int) -> float | None:
+    for offset in range(1, 4):
+        if index + offset >= len(lines):
+            break
+        average = _parse_beta_average_energy_kev(_pad80(lines[index + offset].rstrip("\n")))
+        if average is not None:
+            return average
+    return None
+
+
+def _parse_beta(
+    line: str,
+    kind: radiation.BetaKind,
+    *,
+    average_energy_kev: float | None = None,
+) -> radiation.Beta | None:
+    energy = _parse_energy(line) or average_energy_kev
     intensity = _parse_intensity(line, "B")
     if energy is None or intensity is None:
         return None
-    return radiation.Beta(energy_kev=energy, intensity=intensity)
+    return radiation.Beta(energy_kev=energy, intensity=intensity, kind=kind)
+
+
+def _parse_endpoint_energy_kev(line: str) -> float | None:
+    """ENSDF E record maximum beta energy (cols 42-49), stored in MeV."""
+    value = _parse_value(_slice(line, 42, 49))
+    if value is None:
+        return None
+    return value * 1000.0
+
+
+def _parse_beta_endpoint(line: str, kind: radiation.BetaKind) -> radiation.Beta | None:
+    energy = _parse_endpoint_energy_kev(line)
+    intensity = _parse_value(_slice(line, 65, 74)) or _parse_value(_slice(line, 22, 29))
+    if energy is None or intensity is None:
+        return None
+    return radiation.Beta(energy_kev=energy, intensity=intensity, kind=kind)
 
 
 def _is_tg_line(line: str) -> bool:
@@ -778,6 +831,7 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
         return None
 
     mode_label = _extract_decay_mode_from_title(title) or "DECAY"
+    beta_kind = _beta_kind_for_decay_mode(mode_label)
     parent_id: str | None = None
     half_life_s: float | None = None
     alphas: list[radiation.Alpha] = []
@@ -785,8 +839,8 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
     gammas: list[radiation.Gamma] = []
     xrays = _parse_tg_xray_rows(lines)
 
-    for line in lines:
-        line = _pad80(line.rstrip("\n"))
+    for index, raw_line in enumerate(lines):
+        line = _pad80(raw_line.rstrip("\n"))
         rtype = _record_type(line)
         if rtype is None:
             continue
@@ -798,7 +852,7 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
             hl = _parse_halflife(_slice(line, 40, 49))
             if hl is not None:
                 half_life_s = hl
-        elif rtype in _RADIATION_RECORDS:
+        elif rtype in _RADIATION_RECORDS or rtype == "E":
             if line[5] != " " or line[6] != " ":
                 continue
             if rtype == "A":
@@ -809,8 +863,16 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
                 gamma = _parse_gamma(line)
                 if gamma is not None:
                     gammas.append(gamma)
-            elif rtype == "B":
-                beta = _parse_beta(line)
+            elif rtype == "B" and beta_kind is not None:
+                beta = _parse_beta(
+                    line,
+                    beta_kind,
+                    average_energy_kev=_following_beta_average_energy_kev(lines, index),
+                )
+                if beta is not None:
+                    betas.append(beta)
+            elif rtype == "E" and beta_kind is not None:
+                beta = _parse_beta_endpoint(line, beta_kind)
                 if beta is not None:
                     betas.append(beta)
 

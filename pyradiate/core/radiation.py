@@ -74,11 +74,19 @@ class Gamma(Radiation):
     intensity: float
 
 
+class BetaKind(StrEnum):
+    """Charged beta particle emitted in the transition."""
+
+    ELECTRON = "electron"
+    POSITRON = "positron"
+
+
 @dataclass(frozen=True)
 class Beta(Radiation):
-    """Beta transition with energy and branch intensity (ENSDF B record, E + IB)."""
+    """Beta transition with energy and branch intensity (ENSDF B or E record)."""
 
     intensity: float
+    kind: BetaKind
 
 
 @dataclass(frozen=True)
