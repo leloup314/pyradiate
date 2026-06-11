@@ -1,6 +1,7 @@
 """Minimal parser for ENSDF decay datasets."""
 
 import re
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
@@ -27,6 +28,11 @@ _HALFLIFE_TO_SECONDS = {
     "KY": 31557600e3,
     "MY": 31557600e6,
 }
+
+_DATASET_HEADER_RE = re.compile(
+    r"^\s*(\S{1,5})\s{4,}(.+?)\s{2,}\S",
+    re.IGNORECASE,
+)
 
 _DECAY_DATASET_RE = re.compile(
     r"^\s*(\S{1,5})\s{4,}(.+?\b([A-Z][A-Z0-9+\-]*)\s+DECAY\b.*?)\s{2,}\S",
@@ -359,26 +365,102 @@ def _parse_nuclide_id(nucid: str) -> tuple[int, str]:
     return int(m.group(1)), m.group(2).capitalize() or "?"
 
 
+@dataclass(frozen=True)
+class _AdoptedNuclideData:
+    parent_id: str
+    half_life_s: float | None
+    branches: tuple[tuple[str, float], ...]
+    decay_xref_titles: frozenset[str]
+
+
+def _is_xref_line(line: str) -> bool:
+    line = _pad80(line)
+    return len(line) >= 9 and line[7] == "X" and line[8].isalpha()
+
+
+def _parse_xref_body(line: str) -> str:
+    return _pad80(line)[9:].strip()
+
+
+def _normalize_decay_title(title: str) -> str:
+    return re.sub(r"\s+", " ", title.upper().strip())
+
+
+def _is_ground_state_level(line: str) -> bool:
+    energy = _parse_value(_slice(_pad80(line), 10, 19))
+    return energy is None or energy < 1.0
+
+
+def _parse_adopted_dataset(nucid: str, title: str, lines: list[str]) -> _AdoptedNuclideData | None:
+    if "ADOPTED" not in title.upper():
+        return None
+
+    try:
+        parent_id = NuclideIdentifier.from_string(nucid.strip()).identifier
+    except NuclideIdentifierError:
+        return None
+
+    half_life_s: float | None = None
+    branch_items: list[tuple[str, float]] = []
+    decay_xrefs: set[str] = set()
+
+    for line in lines:
+        line = _pad80(line.rstrip("\n"))
+
+        if _is_xref_line(line):
+            xref = _parse_xref_body(line)
+            if " DECAY" in xref.upper():
+                decay_xrefs.add(_normalize_decay_title(xref))
+            continue
+
+        rtype = _record_type(line)
+        if rtype is None:
+            continue
+
+        if rtype == "P" and line[5] == " " and line[6] == " ":
+            hl = _parse_halflife(_slice(line, 40, 49))
+            if hl is not None:
+                half_life_s = hl
+        elif rtype == "L":
+            if line[5] in (" ", "") and _is_ground_state_level(line):
+                hl = _parse_halflife(_slice(line, 40, 49))
+                if hl is not None:
+                    half_life_s = hl
+            if line[5] not in (" ", ""):
+                text = line[9:].strip() if len(line) > 9 else ""
+                for bm, val in _BRANCH_RE.findall(text):
+                    v = _parse_value(val.replace("$", ""))
+                    if v is not None:
+                        branch_items.append((bm.upper(), v))
+
+    return _AdoptedNuclideData(
+        parent_id=parent_id,
+        half_life_s=half_life_s,
+        branches=tuple(branch_items),
+        decay_xref_titles=frozenset(decay_xrefs),
+    )
+
+
 def _split_datasets(lines: list[str]) -> list[tuple[str, str, list[str]]]:
     datasets: list[tuple[str, str, list[str]]] = []
     current_title: str | None = None
-    current_daughter: str | None = None
+    current_nucid: str | None = None
     current_body: list[str] = []
 
     def flush() -> None:
-        nonlocal current_title, current_daughter, current_body
+        nonlocal current_title, current_nucid, current_body
         if current_title and current_body:
-            datasets.append((current_daughter or "", current_title, current_body))
+            datasets.append((current_nucid or "", current_title, current_body))
         current_title = None
-        current_daughter = None
+        current_nucid = None
         current_body = []
 
     for line in lines:
         if _is_dataset_header(line):
-            m = _DECAY_DATASET_RE.match(line)
+            m = _DATASET_HEADER_RE.match(line)
             if m:
                 flush()
-                current_daughter = m.group(1).strip()
+                current_nucid = m.group(1).strip()
                 current_title = m.group(2).strip()
                 current_body = []
             else:
@@ -389,6 +471,63 @@ def _split_datasets(lines: list[str]) -> list[tuple[str, str, list[str]]]:
 
     flush()
     return datasets
+
+
+def _decay_identity_key(parent_id: str, decay: radiation.Decay) -> tuple:
+    mode = _extract_decay_mode_from_title(decay.mode) or decay.mode
+    return (parent_id, mode, decay.daughter_nuclide.identifier, round(decay.half_life_s, 6))
+
+
+def _radiation_count(decay: radiation.Decay) -> int:
+    return len(decay.alphas) + len(decay.betas) + len(decay.gammas) + len(decay.xrays)
+
+
+def _select_preferred_decay(
+    candidates: list[tuple[str, radiation.Decay, str, int]],
+    adopted_xrefs: frozenset[str],
+) -> tuple[str, radiation.Decay, str, int]:
+    def score(item: tuple[str, radiation.Decay, str, int]) -> int:
+        _, _, title, rad_count = item
+        value = rad_count
+        if _normalize_decay_title(title) in adopted_xrefs:
+            value += 10000
+        if re.search(r"DATA SET\s*#\d", title, re.IGNORECASE):
+            value -= 50
+        return value
+
+    return max(candidates, key=score)
+
+
+def _hl_close(a: float, b: float, rtol: float = 0.05) -> bool:
+    if a <= 0 or b <= 0:
+        return False
+    ratio = a / b
+    return (1 - rtol) <= ratio <= (1 + rtol)
+
+
+def _apply_adopted_data(decay: radiation.Decay, adopted: _AdoptedNuclideData) -> radiation.Decay:
+    half_life = decay.half_life_s
+    branches = decay.branches
+
+    if adopted.half_life_s is not None and _hl_close(decay.half_life_s, adopted.half_life_s):
+        half_life = adopted.half_life_s
+        if adopted.branches:
+            branches = adopted.branches
+
+    if half_life == decay.half_life_s and branches == decay.branches:
+        return decay
+
+    return radiation.Decay(
+        mode=decay.mode,
+        dataset_id=decay.dataset_id,
+        daughter_nuclide=decay.daughter_nuclide,
+        half_life_s=half_life,
+        branches=branches,
+        alphas=decay.alphas,
+        betas=decay.betas,
+        gammas=decay.gammas,
+        xrays=decay.xrays,
+    )
 
 
 def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[str, radiation.Decay] | None:
@@ -486,19 +625,48 @@ def parse_ensdf_file(path: str | Path) -> dict[str, list[radiation.Decay]]:
 
     Only decay datasets with a parseable half-life are included.
     Radiation records are kept only when all required fields for their type parse.
+    Adopted-level half-lives and branch fractions override decay-dataset values
+    when they agree within 5 %.  Multiple decay datasets for the same parent state
+    are deduplicated, preferring datasets cross-referenced from adopted levels.
     """
     path = Path(path)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
 
-    decays = {}
-    for daughter, title, body in _split_datasets(lines):
-        if " DECAY" not in title.upper():
-            continue
-        parsed = _parse_decay_dataset(daughter, title, body)
-        if parsed is None:
-            continue
-        parent_id, mode = parsed
-        decays.setdefault(parent_id, []).append(mode)
+    adopted_map: dict[str, _AdoptedNuclideData] = {}
+    adopted_xrefs: set[str] = set()
+    raw_decays: list[tuple[str, radiation.Decay, str, int]] = []
+
+    for nucid, title, body in _split_datasets(lines):
+        title_upper = title.upper()
+        if "ADOPTED" in title_upper:
+            adopted = _parse_adopted_dataset(nucid, title, body)
+            if adopted is not None:
+                adopted_map[adopted.parent_id] = adopted
+                adopted_xrefs.update(adopted.decay_xref_titles)
+        elif " DECAY" in title_upper:
+            parsed = _parse_decay_dataset(nucid, title, body)
+            if parsed is None:
+                continue
+            parent_id, decay = parsed
+            raw_decays.append((parent_id, decay, title, _radiation_count(decay)))
+
+    xref_set = frozenset(adopted_xrefs)
+    normalized_decays: list[tuple[str, radiation.Decay, str, int]] = []
+    for parent_id, decay, title, rad_count in raw_decays:
+        if parent_id in adopted_map:
+            decay = _apply_adopted_data(decay, adopted_map[parent_id])
+        normalized_decays.append((parent_id, decay, title, rad_count))
+
+    grouped: dict[tuple, list[tuple[str, radiation.Decay, str, int]]] = {}
+    for item in normalized_decays:
+        parent_id, decay, title, rad_count = item
+        key = _decay_identity_key(parent_id, decay)
+        grouped.setdefault(key, []).append(item)
+
+    decays: dict[str, list[radiation.Decay]] = {}
+    for candidates in grouped.values():
+        parent_id, decay, _, _ = _select_preferred_decay(candidates, xref_set)
+        decays.setdefault(parent_id, []).append(decay)
 
     return decays
 
