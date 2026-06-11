@@ -37,7 +37,7 @@ class RadioNuclide:
 
     @property
     def half_life(self) -> float:
-        return self.decays[0].half_life_s
+        return self._recommended_half_life_s
 
     @property
     def decays(self) -> list[Decay]:
@@ -49,8 +49,9 @@ class RadioNuclide:
 
     def __init__(self, mass_number: int, element: Elements, activity: float | None = None):
         self._nuclide_identifier = NuclideIdentifier(mass_number=mass_number, element=element)
-        self._decays = parse_radio_nuclide(self._nuclide_identifier)
-        # Accesible attributes
+        parsed = parse_radio_nuclide(self._nuclide_identifier)
+        self._decays = list(parsed.decays)
+        self._recommended_half_life_s = parsed.recommended_half_life_s
         self.activity = activity
 
     def __iter__(self):

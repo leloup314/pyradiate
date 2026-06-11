@@ -1,6 +1,48 @@
+import re
 from dataclasses import dataclass
+from enum import StrEnum
 
 from pyradiate.core.nuclide import NuclideIdentifier
+
+
+class DecayBranch(StrEnum):
+    """ENSDF decay branch identifier (e.g. %B-=, %IT=, %EC+%B+=)."""
+
+    C14 = "14C"
+    B_MINUS_2 = "2B-"
+    EC_2 = "2EC"
+    N_2 = "2N"
+    P_2 = "2P"
+    ALPHA = "A"
+    B_PLUS = "B+"
+    B_PLUS_2 = "2B+"
+    B_PLUS_2P = "B+2P"
+    B_PLUS_3P = "B+3P"
+    B_PLUS_ALPHA = "B+A"
+    B_PLUS_PROTON = "B+P"
+    B_MINUS = "B-"
+    B_MINUS_2N = "B-2N"
+    B_MINUS_ALPHA = "B-A"
+    B_MINUS_N = "B-N"
+    B_MINUS_PROTON = "B-P"
+    EC = "EC"
+    EC_B_PLUS = "EC+B+"
+    EC_2P = "EC2P"
+    EC_3P = "EC3P"
+    EC_ALPHA = "ECA"
+    EC_PROTON = "ECP"
+    IT = "IT"
+    NEUTRON = "N"
+    PROTON = "P"
+    SF = "SF"
+
+    @classmethod
+    def parse(cls, value: str) -> "DecayBranch":
+        normalized = re.sub(r"\s+DECAY.*", "", value.strip(), flags=re.IGNORECASE).strip().upper()
+        for member in cls:
+            if member.value == normalized:
+                return member
+        raise ValueError(f"Unknown decay branch identifier: {value!r}")
 
 
 @dataclass(frozen=True)
@@ -43,7 +85,8 @@ class Decay:
     dataset_id: str
     daughter_nuclide: NuclideIdentifier
     half_life_s: float
-    branches: tuple[tuple[str, float], ...]
+    branch: DecayBranch
+    branch_fraction: float
     alphas: tuple[Alpha, ...]
     betas: tuple[Beta, ...]
     gammas: tuple[Gamma, ...]

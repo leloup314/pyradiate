@@ -55,7 +55,7 @@ _DECAY_MODE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_BRANCH_RE = re.compile(r"%([A-Z][A-Z0-9+\-]*)=([^\s$%]+)")
+_BRANCH_RE = re.compile(r"%([0-9]*[A-Z][A-Z0-9+\-]*)=([0-9.]+)")
 
 _RADIATION_RECORDS = frozenset({"G", "B", "A"})
 
@@ -366,11 +366,47 @@ def _parse_nuclide_id(nucid: str) -> tuple[int, str]:
 
 
 @dataclass(frozen=True)
+class _AdoptedLevelData:
+    half_life_s: float | None
+    branches: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True)
 class _AdoptedNuclideData:
     parent_id: str
     half_life_s: float | None
     branches: tuple[tuple[str, float], ...]
+    levels: tuple[_AdoptedLevelData, ...]
     decay_xref_titles: frozenset[str]
+
+
+@dataclass(frozen=True)
+class ParsedRadioNuclide:
+    decays: tuple[radiation.Decay, ...]
+    recommended_half_life_s: float
+
+
+@dataclass(frozen=True)
+class _EnsdfFileData:
+    decays_by_parent: dict[str, list[radiation.Decay]]
+    adopted_map: dict[str, _AdoptedNuclideData]
+    adopted_xrefs: frozenset[str]
+
+
+def _extract_branches_from_text(text: str) -> list[tuple[str, float]]:
+    branches: list[tuple[str, float]] = []
+    for mode, value_s in _BRANCH_RE.findall(text):
+        if re.search(r"[\$\{\|\(;<]", mode):
+            continue
+        value = _parse_value(value_s)
+        if value is None:
+            continue
+        try:
+            branch_id = radiation.DecayBranch.parse(mode)
+        except ValueError:
+            continue
+        branches.append((branch_id.value, value))
+    return branches
 
 
 def _is_xref_line(line: str) -> bool:
@@ -401,8 +437,10 @@ def _parse_adopted_dataset(nucid: str, title: str, lines: list[str]) -> _Adopted
         return None
 
     half_life_s: float | None = None
-    branch_items: list[tuple[str, float]] = []
+    ground_state_branches: list[tuple[str, float]] = []
     decay_xrefs: set[str] = set()
+    levels: list[dict[str, object]] = []
+    current_level_idx: int | None = None
 
     for line in lines:
         line = _pad80(line.rstrip("\n"))
@@ -422,21 +460,35 @@ def _parse_adopted_dataset(nucid: str, title: str, lines: list[str]) -> _Adopted
             if hl is not None:
                 half_life_s = hl
         elif rtype == "L":
-            if line[5] in (" ", "") and _is_ground_state_level(line):
+            if line[5] in (" ", ""):
                 hl = _parse_halflife(_slice(line, 40, 49))
-                if hl is not None:
+                levels.append({"half_life_s": hl, "branches": [], "is_ground_state": _is_ground_state_level(line)})
+                current_level_idx = len(levels) - 1
+                if levels[-1]["is_ground_state"] and hl is not None:
                     half_life_s = hl
-            if line[5] not in (" ", ""):
+            elif line[5] not in (" ", "") and current_level_idx is not None:
                 text = line[9:].strip() if len(line) > 9 else ""
-                for bm, val in _BRANCH_RE.findall(text):
-                    v = _parse_value(val.replace("$", ""))
-                    if v is not None:
-                        branch_items.append((bm.upper(), v))
+                level_branches = _extract_branches_from_text(text)
+                if level_branches:
+                    level = levels[current_level_idx]
+                    level["branches"] = [*level["branches"], *level_branches]
+                    if level["is_ground_state"]:
+                        ground_state_branches.extend(level_branches)
+
+    adopted_levels = tuple(
+        _AdoptedLevelData(
+            half_life_s=level["half_life_s"],
+            branches=tuple(level["branches"]),
+        )
+        for level in levels
+        if level["branches"] or level["half_life_s"] is not None
+    )
 
     return _AdoptedNuclideData(
         parent_id=parent_id,
         half_life_s=half_life_s,
-        branches=tuple(branch_items),
+        branches=tuple(ground_state_branches),
+        levels=adopted_levels,
         decay_xref_titles=frozenset(decay_xrefs),
     )
 
@@ -506,23 +558,16 @@ def _hl_close(a: float, b: float, rtol: float = 0.05) -> bool:
 
 
 def _apply_adopted_data(decay: radiation.Decay, adopted: _AdoptedNuclideData) -> radiation.Decay:
-    half_life = decay.half_life_s
-    branches = decay.branches
-
-    if adopted.half_life_s is not None and _hl_close(decay.half_life_s, adopted.half_life_s):
-        half_life = adopted.half_life_s
-        if adopted.branches:
-            branches = adopted.branches
-
-    if half_life == decay.half_life_s and branches == decay.branches:
+    if adopted.half_life_s is None or not _hl_close(decay.half_life_s, adopted.half_life_s):
         return decay
 
     return radiation.Decay(
         mode=decay.mode,
         dataset_id=decay.dataset_id,
         daughter_nuclide=decay.daughter_nuclide,
-        half_life_s=half_life,
-        branches=branches,
+        half_life_s=adopted.half_life_s,
+        branch=decay.branch,
+        branch_fraction=decay.branch_fraction,
         alphas=decay.alphas,
         betas=decay.betas,
         gammas=decay.gammas,
@@ -530,14 +575,135 @@ def _apply_adopted_data(decay: radiation.Decay, adopted: _AdoptedNuclideData) ->
     )
 
 
+def _decay_mode_key(mode: str) -> str:
+    m = _DECAY_MODE_RE.search(mode.strip())
+    if m:
+        return m.group(1).upper()
+    return re.sub(r"\s+DECAY.*", "", mode, flags=re.IGNORECASE).strip().upper()
+
+
+_BRANCH_MODE_ALIASES: dict[str, tuple[str, ...]] = {
+    "EC+B+": ("EC+%B+", "EC+B+", "B+"),
+    "EC+B-": ("EC+%B-", "EC+B-"),
+    "EC": ("EC", "EC+%B+", "EC+%B-"),
+}
+
+
+def _lookup_branch_fraction(mode_key: str, level_branches: tuple[tuple[str, float], ...]) -> float | None:
+    branch_map = {bm.upper(): val for bm, val in level_branches}
+    if mode_key in branch_map:
+        return branch_map[mode_key]
+    for alias_key, aliases in _BRANCH_MODE_ALIASES.items():
+        if mode_key == alias_key:
+            for name in aliases:
+                if name in branch_map:
+                    return branch_map[name]
+    return None
+
+
+def _level_branches_for_decay(
+    decay: radiation.Decay,
+    adopted: _AdoptedNuclideData | None,
+) -> tuple[tuple[str, float], ...]:
+    if adopted is None:
+        return ()
+
+    for level in adopted.levels:
+        if level.half_life_s is not None and _hl_close(decay.half_life_s, level.half_life_s):
+            if level.branches:
+                return level.branches
+
+    if adopted.half_life_s is not None and _hl_close(decay.half_life_s, adopted.half_life_s):
+        return adopted.branches
+
+    return ()
+
+
+def _finalize_decay_branches(
+    decay: radiation.Decay,
+    adopted: _AdoptedNuclideData | None,
+    *,
+    sibling_count: int,
+) -> radiation.Decay:
+    branch = radiation.DecayBranch.parse(_decay_mode_key(decay.mode))
+    level_branches = _level_branches_for_decay(decay, adopted)
+    branch_fraction = _lookup_branch_fraction(branch.value, level_branches)
+    if branch_fraction is None and sibling_count == 1:
+        branch_fraction = 100.0
+    if branch_fraction is None:
+        branch_fraction = decay.branch_fraction
+
+    return radiation.Decay(
+        mode=decay.mode,
+        dataset_id=decay.dataset_id,
+        daughter_nuclide=decay.daughter_nuclide,
+        half_life_s=decay.half_life_s,
+        branch=branch,
+        branch_fraction=branch_fraction,
+        alphas=decay.alphas,
+        betas=decay.betas,
+        gammas=decay.gammas,
+        xrays=decay.xrays,
+    )
+
+
+def _finalize_parent_decays(
+    decays: list[radiation.Decay],
+    adopted: _AdoptedNuclideData | None,
+) -> list[radiation.Decay]:
+    siblings_by_hl: dict[float, int] = {}
+    for decay in decays:
+        hl_key = round(decay.half_life_s, 6)
+        siblings_by_hl[hl_key] = siblings_by_hl.get(hl_key, 0) + 1
+
+    return [
+        _finalize_decay_branches(
+            decay,
+            adopted,
+            sibling_count=siblings_by_hl[round(decay.half_life_s, 6)],
+        )
+        for decay in decays
+    ]
+
+
+def _recommended_half_life_s(
+    decays: list[radiation.Decay],
+    adopted: _AdoptedNuclideData | None,
+) -> float:
+    if adopted is not None and adopted.half_life_s is not None:
+        return adopted.half_life_s
+    return decays[0].half_life_s
+
+
+def _dedupe_decays_for_parent(
+    parent_id: str,
+    decays: list[radiation.Decay],
+    adopted_xrefs: frozenset[str],
+) -> list[radiation.Decay]:
+    grouped: dict[tuple, list[radiation.Decay]] = {}
+    for decay in decays:
+        key = _decay_identity_key(parent_id, decay)
+        grouped.setdefault(key, []).append(decay)
+
+    deduped: list[radiation.Decay] = []
+    for group in grouped.values():
+        if len(group) == 1:
+            deduped.append(group[0])
+            continue
+        candidates = [(parent_id, decay, decay.dataset_id, _radiation_count(decay)) for decay in group]
+        _, best, _, _ = _select_preferred_decay(candidates, adopted_xrefs)
+        deduped.append(best)
+    return deduped
+
+
 def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[str, radiation.Decay] | None:
     if " DECAY" not in title.upper():
         return None
 
     mode_label = _extract_decay_mode_from_title(title) or "DECAY"
+    branch = radiation.DecayBranch.parse(_decay_mode_key(mode_label))
     parent_id: str | None = None
     half_life_s: float | None = None
-    branch_items: list[tuple[str, float]] = []
     alphas: list[radiation.Alpha] = []
     betas: list[radiation.Beta] = []
     gammas: list[radiation.Gamma] = []
@@ -556,13 +722,6 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
             hl = _parse_halflife(_slice(line, 40, 49))
             if hl is not None:
                 half_life_s = hl
-        elif rtype == "L":
-            if line[5] not in (" ", ""):
-                text = line[9:].strip() if len(line) > 9 else ""
-                for bm, val in _BRANCH_RE.findall(text):
-                    v = _parse_value(val.replace("$", ""))
-                    if v is not None:
-                        branch_items.append((bm.upper(), v))
         elif rtype in _RADIATION_RECORDS:
             if line[5] != " " or line[6] != " ":
                 continue
@@ -600,7 +759,8 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
             dataset_id=title,
             daughter_nuclide=NuclideIdentifier.from_string(daughter.strip()),
             half_life_s=half_life_s,
-            branches=tuple(branch_items),
+            branch=branch,
+            branch_fraction=100.0,
             alphas=tuple(alphas),
             betas=tuple(betas),
             gammas=tuple(gammas),
@@ -610,24 +770,23 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
         return None
 
 
-def parse_radio_nuclide(nuclide_identifier: NuclideIdentifier) -> list[radiation.Decay]:
-    # mass_data = parse_ensdf_file(ensdf_path / f"ensdf.{nuclide_identifier.mass_number:03d}")
+def parse_radio_nuclide(nuclide_identifier: NuclideIdentifier) -> ParsedRadioNuclide:
     mass_data = parse_ensdf_directory(ensdf_path)
-    if nuclide_identifier.identifier not in mass_data:
-        raise NuclideIdentifierError("This does not work")
-    return mass_data[nuclide_identifier.identifier]
+    meta = mass_data.get(nuclide_identifier.identifier)
+    if meta is None:
+        raise NuclideIdentifierError(f"No decay data for {nuclide_identifier.identifier}")
+    return meta
 
 
 @cache
-def parse_ensdf_file(path: str | Path) -> dict[str, list[radiation.Decay]]:
+def parse_ensdf_file(path: str | Path) -> _EnsdfFileData:
     """
-    Parse one ENSDF mass file and return radionuclides keyed by NUCID.
+    Parse one ENSDF mass file.
 
-    Only decay datasets with a parseable half-life are included.
-    Radiation records are kept only when all required fields for their type parse.
-    Adopted-level half-lives and branch fractions override decay-dataset values
-    when they agree within 5 %.  Multiple decay datasets for the same parent state
-    are deduplicated, preferring datasets cross-referenced from adopted levels.
+    Returns per-parent decay lists (not yet branch-finalized) and any adopted-level
+    data found in this file.  Decay datasets for a parent may also appear in other
+    mass files (keyed by the daughter nucleus); use parse_ensdf_directory for the
+    complete merged result.
     """
     path = Path(path)
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -663,21 +822,44 @@ def parse_ensdf_file(path: str | Path) -> dict[str, list[radiation.Decay]]:
         key = _decay_identity_key(parent_id, decay)
         grouped.setdefault(key, []).append(item)
 
-    decays: dict[str, list[radiation.Decay]] = {}
+    decays_by_parent: dict[str, list[radiation.Decay]] = {}
     for candidates in grouped.values():
         parent_id, decay, _, _ = _select_preferred_decay(candidates, xref_set)
-        decays.setdefault(parent_id, []).append(decay)
+        decays_by_parent.setdefault(parent_id, []).append(decay)
 
-    return decays
+    return _EnsdfFileData(
+        decays_by_parent=decays_by_parent,
+        adopted_map=adopted_map,
+        adopted_xrefs=xref_set,
+    )
 
 
-def parse_ensdf_directory(path: str | Path) -> dict[str, list[radiation.Decay]]:
+def parse_ensdf_directory(path: str | Path) -> dict[str, ParsedRadioNuclide]:
     """Parse all ensdf.* files in a directory."""
     path = Path(path)
-    decays = {}
-    for fp in sorted(path.glob("ensdf.*")):
-        for nid, nuc in parse_ensdf_file(fp).items():
-            if nuc:
-                decays.setdefault(nid, []).extend(nuc)
+    all_decays: dict[str, list[radiation.Decay]] = {}
+    adopted_map: dict[str, _AdoptedNuclideData] = {}
+    adopted_xrefs: set[str] = set()
 
-    return decays
+    for fp in sorted(path.glob("ensdf.*")):
+        file_data = parse_ensdf_file(fp)
+        adopted_map.update(file_data.adopted_map)
+        adopted_xrefs.update(file_data.adopted_xrefs)
+        for parent_id, decays in file_data.decays_by_parent.items():
+            all_decays.setdefault(parent_id, []).extend(decays)
+
+    xref_set = frozenset(adopted_xrefs)
+    result: dict[str, ParsedRadioNuclide] = {}
+    for parent_id, parent_decays in all_decays.items():
+        adopted = adopted_map.get(parent_id)
+        normalized = [
+            _apply_adopted_data(decay, adopted) if adopted is not None else decay for decay in parent_decays
+        ]
+        deduped = _dedupe_decays_for_parent(parent_id, normalized, xref_set)
+        finalized = _finalize_parent_decays(deduped, adopted)
+        result[parent_id] = ParsedRadioNuclide(
+            decays=tuple(finalized),
+            recommended_half_life_s=_recommended_half_life_s(finalized, adopted),
+        )
+
+    return result
