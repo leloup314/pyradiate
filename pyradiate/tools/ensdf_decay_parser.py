@@ -402,7 +402,7 @@ def _extract_branches_from_text(text: str) -> list[tuple[str, float]]:
         if value is None:
             continue
         try:
-            branch_id = radiation.DecayBranch.parse(mode)
+            branch_id = radiation.DecayBranch.from_string(mode)
         except ValueError:
             continue
         branches.append((branch_id.value, value))
@@ -625,7 +625,7 @@ def _finalize_decay_branches(
     *,
     sibling_count: int,
 ) -> radiation.Decay:
-    branch = radiation.DecayBranch.parse(_decay_mode_key(decay.mode))
+    branch = radiation.DecayBranch.from_string(_decay_mode_key(decay.mode))
     level_branches = _level_branches_for_decay(decay, adopted)
     branch_fraction = _lookup_branch_fraction(branch.value, level_branches)
     if branch_fraction is None and sibling_count == 1:
@@ -701,7 +701,7 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
         return None
 
     mode_label = _extract_decay_mode_from_title(title) or "DECAY"
-    branch = radiation.DecayBranch.parse(_decay_mode_key(mode_label))
+    branch = radiation.DecayBranch.from_string(_decay_mode_key(mode_label))
     parent_id: str | None = None
     half_life_s: float | None = None
     alphas: list[radiation.Alpha] = []
@@ -852,9 +852,7 @@ def parse_ensdf_directory(path: str | Path) -> dict[str, ParsedRadioNuclide]:
     result: dict[str, ParsedRadioNuclide] = {}
     for parent_id, parent_decays in all_decays.items():
         adopted = adopted_map.get(parent_id)
-        normalized = [
-            _apply_adopted_data(decay, adopted) if adopted is not None else decay for decay in parent_decays
-        ]
+        normalized = [_apply_adopted_data(decay, adopted) if adopted is not None else decay for decay in parent_decays]
         deduped = _dedupe_decays_for_parent(parent_id, normalized, xref_set)
         finalized = _finalize_parent_decays(deduped, adopted)
         result[parent_id] = ParsedRadioNuclide(

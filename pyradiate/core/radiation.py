@@ -37,12 +37,12 @@ class DecayBranch(StrEnum):
     SF = "SF"
 
     @classmethod
-    def parse(cls, value: str) -> "DecayBranch":
-        normalized = re.sub(r"\s+DECAY.*", "", value.strip(), flags=re.IGNORECASE).strip().upper()
-        for member in cls:
-            if member.value == normalized:
-                return member
-        raise ValueError(f"Unknown decay branch identifier: {value!r}")
+    def from_string(cls, ensdf_decay_string: str):
+        normalized = re.sub(r"\s+DECAY.*", "", ensdf_decay_string.strip(), flags=re.IGNORECASE).strip().upper()
+        for branch in cls:
+            if branch.value == normalized:
+                return branch
+        raise ValueError(f"Unknown decay branch identifier: {ensdf_decay_string!r}")
 
 
 @dataclass(frozen=True)
