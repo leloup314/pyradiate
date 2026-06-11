@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -5,7 +7,7 @@ from enum import StrEnum
 from pyradiate.core.nuclide import NuclideIdentifier
 
 
-class DecayBranch(StrEnum):
+class BranchIdentifier(StrEnum):
     """ENSDF decay branch identifier (e.g. %B-=, %IT=, %EC+%B+=)."""
 
     C14 = "14C"
@@ -37,12 +39,22 @@ class DecayBranch(StrEnum):
     SF = "SF"
 
     @classmethod
-    def from_string(cls, ensdf_decay_string: str):
+    def from_string(cls, ensdf_decay_string: str) -> "BranchIdentifier":
         normalized = re.sub(r"\s+DECAY.*", "", ensdf_decay_string.strip(), flags=re.IGNORECASE).strip().upper()
+        normalized = re.sub(r"\+%", "+", normalized)
         for branch in cls:
             if branch.value == normalized:
                 return branch
         raise ValueError(f"Unknown decay branch identifier: {ensdf_decay_string!r}")
+
+
+@dataclass(frozen=True)
+class DecayBranch:
+    """One competing decay mode within a parent-state decay."""
+
+    identifier: BranchIdentifier
+    fraction: float
+    daughter_nuclide: NuclideIdentifier
 
 
 @dataclass(frozen=True)
@@ -79,15 +91,18 @@ class Xray(Radiation):
 
 @dataclass(frozen=True)
 class Decay:
-    """One evaluated decay pathway (e.g. EC decay of 89Zr)."""
+    """One parent-state decay with one or more competing branch modes."""
 
-    mode: str
     dataset_id: str
-    daughter_nuclide: NuclideIdentifier
     half_life_s: float
-    branch: DecayBranch
-    branch_fraction: float
+    branches: tuple[DecayBranch, ...]
     alphas: tuple[Alpha, ...]
     betas: tuple[Beta, ...]
     gammas: tuple[Gamma, ...]
     xrays: tuple[Xray, ...]
+
+    @property
+    def mode(self) -> str:
+        """ENSDF-style summary label derived from branch identifiers."""
+        labels = sorted(branch.identifier.value for branch in self.branches)
+        return "+".join(labels) + " DECAY" if labels else ""

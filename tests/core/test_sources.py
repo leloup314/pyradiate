@@ -21,7 +21,7 @@ def test_radio_nuclide_from_valid_identifier(valid_identifier):
     assert rn.atomic_number == 30
     assert rn.activity is None
     assert rn.half_life == rn.decays[0].half_life_s
-    assert rn.decays[0].branch_fraction == 100.0
+    assert sum(branch.fraction for branch in rn.decays[0].branches) == 100.0
 
 
 def test_radio_nuclide_from_invalid_identifier_fails(invalid_identifier):
