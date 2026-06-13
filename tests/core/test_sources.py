@@ -1,7 +1,7 @@
 import pytest
 
 from pyradiate.core.elements import Elements
-from pyradiate.core.source import RadioNuclide
+from pyradiate.core.source import RadioNuclide, Source
 from pyradiate.core.nuclide import NuclideIdentifierError
 
 
@@ -26,3 +26,19 @@ def test_radio_nuclide_from_valid_identifier(valid_identifier):
 def test_radio_nuclide_from_invalid_identifier_fails(invalid_identifier):
     with pytest.raises(NuclideIdentifierError):
         _ = RadioNuclide.from_string(invalid_identifier)
+
+
+def test_radionuclide_creates_one_instance_per_nuclid():
+    ba133_one = RadioNuclide.from_string("133Ba")
+    ba133_two = RadioNuclide.from_string("ba-133")
+    assert ba133_one is ba133_two
+
+
+def test_source_contains_nuclide():
+    radio_nuclides = {"133Ba": 1e5, "65Zn": 1e4, "60Co": 1e3}
+    source = Source(
+        radio_nuclides=[RadioNuclide.from_string(x) for x in radio_nuclides], activities=list(radio_nuclides.values())
+    )
+
+    assert all(RadioNuclide.from_string(x) in source for x in radio_nuclides)
+    assert source.activity == sum(radio_nuclides.values())
