@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pyradiate import ensdf_path
 from pyradiate.core import radiation
-from pyradiate.core.nuclide import NuclideIdentifier, NuclideIdentifierError
+from pyradiate.core.nuclide_id import NuclideIdentifier, NuclideIdentifierError
 
 # Half-life unit multipliers to seconds (ENSDF field T)
 _HALFLIFE_TO_SECONDS = {
@@ -55,9 +55,7 @@ _DECAY_MODE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_BRANCH_RE = re.compile(
-    r"%((?:[0-9]*[A-Z][A-Z0-9+\-]*)(?:\+(?:%)?[0-9]*[A-Z][A-Z0-9+\-]*)*)=([0-9.]+)"
-)
+_BRANCH_RE = re.compile(r"%((?:[0-9]*[A-Z][A-Z0-9+\-]*)(?:\+(?:%)?[0-9]*[A-Z][A-Z0-9+\-]*)*)=([0-9.]+)")
 
 _RADIATION_RECORDS = frozenset({"G", "B", "A"})
 _BETA_AVERAGE_ENERGY_RE = re.compile(r"EAV=(\d+\.?\d*(?:[Ee][+-]?\d+)?)")
@@ -750,8 +748,7 @@ def _branches_for_half_life(
     level_branches = _filter_detail_branches(_level_branches_for_half_life(adopted, half_life_s))
     if level_branches:
         branches = tuple(
-            _make_decay_branch(mode, fraction, datasets_by_mode, datasets)
-            for mode, fraction in level_branches
+            _make_decay_branch(mode, fraction, datasets_by_mode, datasets) for mode, fraction in level_branches
         )
         return _normalize_branch_fractions(branches)
 
@@ -761,8 +758,7 @@ def _branches_for_half_life(
 
     share = 100.0 / len(datasets)
     return tuple(
-        _make_decay_branch(_decay_mode_key(dataset.mode), share, datasets_by_mode, datasets)
-        for dataset in datasets
+        _make_decay_branch(_decay_mode_key(dataset.mode), share, datasets_by_mode, datasets) for dataset in datasets
     )
 
 

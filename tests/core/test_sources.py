@@ -1,8 +1,9 @@
 import pytest
 
 from pyradiate.core.elements import Elements
-from pyradiate.core.source import RadioNuclide, Source
-from pyradiate.core.nuclide import NuclideIdentifierError
+from pyradiate.core.sources import Source
+from pyradiate.core.radio_nuclide import RadioNuclide
+from pyradiate.core.nuclide_id import NuclideIdentifierError
 
 
 @pytest.fixture(params=["Zn65", "Zn_65", "65_zn", "65zN", "zn-65"])

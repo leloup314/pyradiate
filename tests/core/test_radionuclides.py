@@ -1,6 +1,6 @@
 import pytest
 
-from pyradiate.core.source import RadioNuclide
+from pyradiate.core.radio_nuclide import RadioNuclide
 
 
 @pytest.fixture(

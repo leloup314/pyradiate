@@ -1,6 +1,6 @@
 from pyradiate.core import radiation
 from pyradiate.core.elements import Elements
-from pyradiate.core.nuclide import NuclideIdentifier
+from pyradiate.core.nuclide_id import NuclideIdentifier
 from pyradiate.physics import decay_constant
 from pyradiate.tools.ensdf_decay_parser import parse_radio_nuclide
 
@@ -82,34 +82,3 @@ class RadioNuclide:
 
     def gammas(self, sort_by: str = "I") -> list[radiation.Gamma]:
         return self._radiation(kind="gammas", sort_by=sort_by)
-
-
-class Source:
-    @property
-    def nuclides(self) -> list[RadioNuclide]:
-        return self._radio_nuclides
-
-    @property
-    def activity(self) -> float:
-        return sum(self._activities)
-
-    def __init__(self, radio_nuclides: list[RadioNuclide], activities: list[float]):
-        assert len(radio_nuclides) == len(activities), "Lengths of RadioNuclides and activities do not match"
-        self._radio_nuclides = radio_nuclides
-        self._activities = activities
-
-    def __contains__(self, rn: RadioNuclide):
-        return rn in self._radio_nuclides
-
-    def __repr__(self):
-        return f"Source[{', '.join(f'{self.nuclides[i].identifier}({self._activities[i]} Bq)' for i in range(len(self.nuclides)))}]"
-
-
-class CalibratedSource(Source):
-    """
-    Radioactive source of calibrated activity at given time
-    """
-
-
-class Sample(Source):
-    pass

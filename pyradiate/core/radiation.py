@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pyradiate.core.nuclide import NuclideIdentifier
+from pyradiate.core.nuclide_id import NuclideIdentifier
 
 
 class BranchIdentifier(StrEnum):
@@ -39,7 +37,7 @@ class BranchIdentifier(StrEnum):
     SF = "SF"
 
     @classmethod
-    def from_string(cls, ensdf_decay_string: str) -> "BranchIdentifier":
+    def from_string(cls, ensdf_decay_string: str):
         normalized = re.sub(r"\s+DECAY.*", "", ensdf_decay_string.strip(), flags=re.IGNORECASE).strip().upper()
         normalized = re.sub(r"\+%", "+", normalized)
         for branch in cls:
