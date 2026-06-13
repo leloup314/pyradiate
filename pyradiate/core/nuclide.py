@@ -13,9 +13,9 @@ class NuclideIdentifier:
     element: Elements
 
     @classmethod
-    def from_string(cls, radionuclide_string):
+    def from_string(cls, nuclide_string):
         """
-        Generate *NuclideIdentifier* from string *radionuclid_string*.
+        Generate *NuclideIdentifier* from string *nuclide_string*.
         The string must be a concatenation of <= 2 (adjacent) characters,
         denoting the element (e.g. 'Zn') and 1<= digits <= 3 with their
         integer value <= 300, providing the mass number (e.g. '65').
@@ -25,13 +25,13 @@ class NuclideIdentifier:
         Examples: '65Zn', 'zn65', '65_zn', 'zn 65'
         """
         # Extract exact element symbol from very permissive identifier string
-        symbol = [c for c in radionuclide_string if c.isalpha()]
+        symbol = [c for c in nuclide_string if c.isalpha()]
         symbol = "".join([c.upper() if i == 0 else c.lower() for i, c in enumerate(symbol)])
-        mass_number = int("".join([c for c in radionuclide_string if c.isdigit()]))
+        mass_number = int("".join([c for c in nuclide_string if c.isdigit()]))
 
         # Construct error strings
         symbol_error = mass_number_error = ""
-        error = f"Input '{radionuclide_string}' contains invalid {{}} '{{}}':\n"
+        error = f"Input '{nuclide_string}' contains invalid {{}} '{{}}':\n"
         if not 1 <= len(symbol) <= 2:
             symbol_error = f"Symbol must contain at least one, at most two characters (has {len(symbol)}."
         elif not hasattr(Elements, symbol):
@@ -51,3 +51,6 @@ class NuclideIdentifier:
 
     def __repr__(self):
         return f"{self.__class__.__name__}[{self.identifier}]"
+
+    def __str__(self):
+        return self.identifier
