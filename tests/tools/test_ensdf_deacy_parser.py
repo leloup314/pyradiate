@@ -4,7 +4,7 @@ import pytest
 
 from pyradiate import ensdf_path
 from pyradiate.core.radiation import BetaKind, BranchIdentifier
-from pyradiate.tools import ensdf_decay_parser
+from pyradiate.tools.ensdf import decay_parser
 
 
 def _branch_sum(decay) -> float:
@@ -17,7 +17,7 @@ def test_ensdf_parser():
     n_xrays = 0
     n_alphas = 0
     n_betas = 0
-    for iso, parsed in ensdf_decay_parser.parse_ensdf_directory(ensdf_path).items():
+    for iso, parsed in decay_parser.parse_ensdf_directory(ensdf_path).items():
         n_isos += 1
         for mode in parsed.decays:
             n_gammas += len(mode.gammas)
@@ -33,26 +33,22 @@ def test_ensdf_parser():
 
 
 def test_ensdf_parser_deduplicates_same_decay():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
-    keys = [
-        (parent, round(decay.half_life_s, 6))
-        for parent, parsed in data.items()
-        for decay in parsed.decays
-    ]
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
+    keys = [(parent, round(decay.half_life_s, 6)) for parent, parsed in data.items() for decay in parsed.decays]
     counts = Counter(keys)
     duplicates = [key for key, count in counts.items() if count > 1]
     assert duplicates == []
 
 
 def test_ensdf_parser_branch_fractions_sum_to_one_hundred():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     for parsed in data.values():
         for decay in parsed.decays:
             assert _branch_sum(decay) == pytest.approx(100.0, rel=0.02, abs=0.5)
 
 
 def test_ensdf_parser_uses_adopted_data_for_zn65():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     zn65 = data["65Zn"]
     assert len(zn65.decays) == 1
     assert zn65.recommended_half_life_s == 243.93 * 86400
@@ -66,15 +62,15 @@ def test_ensdf_parser_uses_adopted_data_for_zn65():
 
 
 def test_ensdf_parser_parses_composite_ec_b_plus_branch():
-    branches = ensdf_decay_parser._extract_branches_from_text("%EC+%B+=100")
+    branches = decay_parser._extract_branches_from_text("%EC+%B+=100")
     assert branches == [(BranchIdentifier.EC_B_PLUS.value, 100.0)]
 
-    branches = ensdf_decay_parser._extract_branches_from_text("%EC=50 %B+=50")
+    branches = decay_parser._extract_branches_from_text("%EC=50 %B+=50")
     assert branches == [(BranchIdentifier.EC.value, 50.0), (BranchIdentifier.B_PLUS.value, 50.0)]
 
 
 def test_ensdf_parser_branch_fractions_for_multi_decay_nuclide():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     carbon9 = data["9C"]
     assert len(carbon9.decays) == 1
     by_branch = {branch.identifier: branch.fraction for branch in carbon9.decays[0].branches}
@@ -83,7 +79,7 @@ def test_ensdf_parser_branch_fractions_for_multi_decay_nuclide():
 
 
 def test_ensdf_parser_isomer_branch_fractions_for_co60():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     co60 = data["60Co"]
     isomer = next(d for d in co60.decays if d.half_life_s < 1000)
     by_branch = {branch.identifier: branch.fraction for branch in isomer.branches}
@@ -93,7 +89,7 @@ def test_ensdf_parser_isomer_branch_fractions_for_co60():
 
 
 def test_ensdf_parser_ba133_groups_isomer_branches():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     ba133 = data["133Ba"]
     assert len(ba133.decays) == 2
 
@@ -118,7 +114,7 @@ def test_ensdf_parser_ba133_groups_isomer_branches():
 
 
 def test_ensdf_parser_parses_beta_endpoint_for_f18():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     f18 = data["18F"]
     decay = f18.decays[0]
     assert len(decay.betas) == 1
@@ -129,15 +125,15 @@ def test_ensdf_parser_parses_beta_endpoint_for_f18():
 
 
 def test_ensdf_parser_beta_kind_from_decay_mode():
-    assert ensdf_decay_parser._beta_kind_for_decay_mode("B- DECAY") is BetaKind.ELECTRON
-    assert ensdf_decay_parser._beta_kind_for_decay_mode("B+ DECAY") is BetaKind.POSITRON
-    assert ensdf_decay_parser._beta_kind_for_decay_mode("EC+B+ DECAY") is BetaKind.POSITRON
-    assert ensdf_decay_parser._beta_kind_for_decay_mode("EC DECAY") is None
+    assert decay_parser._beta_kind_for_decay_mode("B- DECAY") is BetaKind.ELECTRON
+    assert decay_parser._beta_kind_for_decay_mode("B+ DECAY") is BetaKind.POSITRON
+    assert decay_parser._beta_kind_for_decay_mode("EC+B+ DECAY") is BetaKind.POSITRON
+    assert decay_parser._beta_kind_for_decay_mode("EC DECAY") is None
 
 
 def test_ensdf_parser_parses_e_record_endpoint():
     line = " 18O   E               96.73  4  3.27   4 3.5700 19              100            "
-    beta = ensdf_decay_parser._parse_beta_endpoint(line, BetaKind.POSITRON)
+    beta = decay_parser._parse_beta_endpoint(line, BetaKind.POSITRON)
     assert beta is not None
     assert beta.kind is BetaKind.POSITRON
     assert beta.energy_kev == pytest.approx(3570.0)
@@ -145,7 +141,7 @@ def test_ensdf_parser_parses_e_record_endpoint():
 
 
 def test_ensdf_parser_assigns_electron_kind_for_b_minus_branches():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     ca45 = data["45Ca"]
     beta = ca45.decays[0].betas[0]
     assert beta.kind is BetaKind.ELECTRON
@@ -153,7 +149,7 @@ def test_ensdf_parser_assigns_electron_kind_for_b_minus_branches():
 
 
 def test_ensdf_parser_uses_average_beta_energy_for_sr90():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     sr90 = data["90Sr"]
     decay = sr90.decays[0]
     assert decay.mode == "B- DECAY"
@@ -165,6 +161,6 @@ def test_ensdf_parser_uses_average_beta_energy_for_sr90():
 
 
 def test_ensdf_parser_skips_e_records_for_pure_ec_decay():
-    data = ensdf_decay_parser.parse_ensdf_directory(ensdf_path)
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
     be7 = data["7Be"]
     assert all(len(decay.betas) == 0 for decay in be7.decays)

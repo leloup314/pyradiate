@@ -2,7 +2,7 @@ from pyradiate.core import radiation
 from pyradiate.core.elements import Elements
 from pyradiate.core.nuclide_id import NuclideIdentifier
 from pyradiate.physics import decay_constant
-from pyradiate.tools.ensdf_decay_parser import parse_radio_nuclide
+from pyradiate.tools.ensdf.decay_parser import parse_radio_nuclide
 
 
 class RadioNuclide:
