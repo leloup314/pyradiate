@@ -177,12 +177,12 @@ def _parse_gamma(line: str) -> radiation.Gamma | None:
     return radiation.Gamma(energy_kev=energy, intensity=intensity)
 
 
-def _beta_kind_for_decay_mode(mode: str) -> radiation.BetaKind | None:
+def _beta_type_for_decay_mode(mode: str) -> type[radiation.BetaMinus] | type[radiation.BetaPlus] | None:
     key = _decay_mode_key(mode)
     if "B-" in key:
-        return radiation.BetaKind.ELECTRON
+        return radiation.BetaMinus
     if "B+" in key:
-        return radiation.BetaKind.POSITRON
+        return radiation.BetaPlus
     return None
 
 
@@ -210,15 +210,15 @@ def _following_beta_average_energy_kev(lines: list[str], index: int) -> float | 
 
 def _parse_beta(
     line: str,
-    kind: radiation.BetaKind,
+    beta_type: type[radiation.BetaPlus] | type[radiation.BetaMinus],
     *,
     average_energy_kev: float | None = None,
-) -> radiation.Beta | None:
+) -> radiation.BetaPlus | radiation.BetaMinus | None:
     energy = _parse_energy(line) or average_energy_kev
     intensity = _parse_intensity(line, "B")
     if energy is None or intensity is None:
         return None
-    return radiation.Beta(energy_kev=energy, intensity=intensity, kind=kind)
+    return beta_type(energy_kev=energy, intensity=intensity)
 
 
 def _parse_endpoint_energy_kev(line: str) -> float | None:
@@ -229,12 +229,15 @@ def _parse_endpoint_energy_kev(line: str) -> float | None:
     return value * 1000.0
 
 
-def _parse_beta_endpoint(line: str, kind: radiation.BetaKind) -> radiation.Beta | None:
+def _parse_beta_endpoint(
+    line: str,
+    beta_type: type[radiation.BetaPlus] | type[radiation.BetaMinus],
+) -> radiation.BetaPlus | radiation.BetaMinus | None:
     energy = _parse_endpoint_energy_kev(line)
     intensity = _parse_value(_slice(line, 65, 74)) or _parse_value(_slice(line, 22, 29))
     if energy is None or intensity is None:
         return None
-    return radiation.Beta(energy_kev=energy, intensity=intensity, kind=kind)
+    return beta_type(energy_kev=energy, intensity=intensity)
 
 
 def _is_tg_line(line: str) -> bool:
@@ -446,7 +449,7 @@ class _DecayDataset:
     daughter_nuclide: NuclideIdentifier
     half_life_s: float
     alphas: tuple[radiation.Alpha, ...]
-    betas: tuple[radiation.Beta, ...]
+    betas: tuple[radiation.BetaPlus | radiation.BetaMinus, ...]
     gammas: tuple[radiation.Gamma, ...]
     xrays: tuple[radiation.Xray, ...]
 
@@ -827,11 +830,11 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
         return None
 
     mode_label = _extract_decay_mode_from_title(title) or "DECAY"
-    beta_kind = _beta_kind_for_decay_mode(mode_label)
+    beta_type = _beta_type_for_decay_mode(mode_label)
     parent_id: str | None = None
     half_life_s: float | None = None
     alphas: list[radiation.Alpha] = []
-    betas: list[radiation.Beta] = []
+    betas: list[radiation.BetaPlus | radiation.BetaMinus] = []
     gammas: list[radiation.Gamma] = []
     xrays = _parse_tg_xray_rows(lines)
 
@@ -859,16 +862,16 @@ def _parse_decay_dataset(daughter: str, title: str, lines: list[str]) -> tuple[s
                 gamma = _parse_gamma(line)
                 if gamma is not None:
                     gammas.append(gamma)
-            elif rtype == "B" and beta_kind is not None:
+            elif rtype == "B" and beta_type is not None:
                 beta = _parse_beta(
                     line,
-                    beta_kind,
+                    beta_type,
                     average_energy_kev=_following_beta_average_energy_kev(lines, index),
                 )
                 if beta is not None:
                     betas.append(beta)
-            elif rtype == "E" and beta_kind is not None:
-                beta = _parse_beta_endpoint(line, beta_kind)
+            elif rtype == "E" and beta_type is not None:
+                beta = _parse_beta_endpoint(line, beta_type)
                 if beta is not None:
                     betas.append(beta)
 

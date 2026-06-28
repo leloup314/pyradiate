@@ -77,7 +77,7 @@ class RadioNuclide:
     def alphas(self) -> list[radiation.Alpha]:
         return self._radiation(kind="alphas", sort_by="E")
 
-    def betas(self, sort_by: str = "I") -> list[radiation.Beta]:
+    def betas(self, sort_by: str = "I") -> list[radiation.BetaPlus | radiation.BetaMinus]:
         return self._radiation(kind="betas", sort_by=sort_by)
 
     def gammas(self, sort_by: str = "I") -> list[radiation.Gamma]:

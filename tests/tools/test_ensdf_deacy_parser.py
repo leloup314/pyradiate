@@ -3,7 +3,7 @@ from collections import Counter
 import pytest
 
 from pyradiate import ensdf_path
-from pyradiate.core.radiation import BetaKind, BranchIdentifier
+from pyradiate.core.radiation import BetaMinus, BetaPlus, BranchIdentifier
 from pyradiate.tools.ensdf import decay_parser
 
 
@@ -119,23 +119,23 @@ def test_ensdf_parser_parses_beta_endpoint_for_f18():
     decay = f18.decays[0]
     assert len(decay.betas) == 1
     beta = decay.betas[0]
-    assert beta.kind is BetaKind.POSITRON
+    assert type(beta) is BetaPlus
     assert beta.energy_kev == pytest.approx(3570.0, rel=1e-3)
     assert beta.intensity == pytest.approx(100.0)
 
 
-def test_ensdf_parser_beta_kind_from_decay_mode():
-    assert decay_parser._beta_kind_for_decay_mode("B- DECAY") is BetaKind.ELECTRON
-    assert decay_parser._beta_kind_for_decay_mode("B+ DECAY") is BetaKind.POSITRON
-    assert decay_parser._beta_kind_for_decay_mode("EC+B+ DECAY") is BetaKind.POSITRON
-    assert decay_parser._beta_kind_for_decay_mode("EC DECAY") is None
+def test_ensdf_parser_beta_type_from_decay_mode():
+    assert decay_parser._beta_type_for_decay_mode("B- DECAY") is BetaMinus
+    assert decay_parser._beta_type_for_decay_mode("B+ DECAY") is BetaPlus
+    assert decay_parser._beta_type_for_decay_mode("EC+B+ DECAY") is BetaPlus
+    assert decay_parser._beta_type_for_decay_mode("EC DECAY") is None
 
 
 def test_ensdf_parser_parses_e_record_endpoint():
     line = " 18O   E               96.73  4  3.27   4 3.5700 19              100            "
-    beta = decay_parser._parse_beta_endpoint(line, BetaKind.POSITRON)
+    beta = decay_parser._parse_beta_endpoint(line, BetaPlus)
     assert beta is not None
-    assert beta.kind is BetaKind.POSITRON
+    assert type(beta) is BetaPlus
     assert beta.energy_kev == pytest.approx(3570.0)
     assert beta.intensity == pytest.approx(100.0)
 
@@ -144,7 +144,7 @@ def test_ensdf_parser_assigns_electron_kind_for_b_minus_branches():
     data = decay_parser.parse_ensdf_directory(ensdf_path)
     ca45 = data["45Ca"]
     beta = ca45.decays[0].betas[0]
-    assert beta.kind is BetaKind.ELECTRON
+    assert type(beta) is BetaMinus
     assert beta.energy_kev == pytest.approx(258.0)
 
 
@@ -155,7 +155,7 @@ def test_ensdf_parser_uses_average_beta_energy_for_sr90():
     assert decay.mode == "B- DECAY"
     assert len(decay.betas) == 1
     beta = decay.betas[0]
-    assert beta.kind is BetaKind.ELECTRON
+    assert type(beta) is BetaMinus
     assert beta.intensity == pytest.approx(100.0)
     assert beta.energy_kev == pytest.approx(195.7)
 
