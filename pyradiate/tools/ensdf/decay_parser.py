@@ -742,6 +742,94 @@ def _normalize_branch_fractions(
     )
 
 
+_NUCLIDE_TOKEN_RE = re.compile(r"\d+[A-Z]{1,2}")
+
+
+def _parent_nuclide_tokens(parent_id: str) -> frozenset[str]:
+    normalized = parent_id.upper().replace("-", "")
+    return frozenset({parent_id.upper(), normalized})
+
+
+def _build_parent_xref_index(global_xrefs: frozenset[str]) -> dict[str, frozenset[str]]:
+    """Map compact nuclide tokens (e.g. 206BI) to adopted X-ref decay titles."""
+    index: dict[str, set[str]] = {}
+    for xref in global_xrefs:
+        xref_key = xref.replace(" ", "").replace("-", "").upper()
+        for match in _NUCLIDE_TOKEN_RE.finditer(xref_key):
+            index.setdefault(match.group(0), set()).add(xref)
+    return {token: frozenset(xrefs) for token, xrefs in index.items()}
+
+
+def _relevant_adopted_xrefs(
+    parent_id: str,
+    adopted: _AdoptedNuclideData | None,
+    parent_xref_index: dict[str, frozenset[str]],
+) -> frozenset[str]:
+    relevant: set[str] = set()
+    if adopted is not None:
+        relevant.update(adopted.decay_xref_titles)
+    for token in _parent_nuclide_tokens(parent_id):
+        relevant.update(parent_xref_index.get(token.replace("-", "").upper(), ()))
+    return frozenset(relevant)
+
+
+def _filter_datasets_by_adopted_xrefs(
+    parent_id: str,
+    datasets: list[_DecayDataset],
+    adopted: _AdoptedNuclideData | None,
+    parent_xref_index: dict[str, frozenset[str]],
+) -> list[_DecayDataset]:
+    if adopted is None:
+        return datasets
+
+    relevant = _relevant_adopted_xrefs(parent_id, adopted, parent_xref_index)
+    if not relevant:
+        return datasets
+
+    filtered = [dataset for dataset in datasets if _normalize_decay_title(dataset.dataset_id) in relevant]
+    return filtered if filtered else datasets
+
+
+def _selected_datasets_for_radiation(
+    parent_id: str,
+    datasets: list[_DecayDataset],
+    adopted: _AdoptedNuclideData | None,
+    adopted_xrefs: frozenset[str],
+) -> list[_DecayDataset]:
+    if adopted is None:
+        return datasets
+
+    by_mode: dict[str, list[_DecayDataset]] = {}
+    for dataset in datasets:
+        by_mode.setdefault(_decay_mode_key(dataset.mode), []).append(dataset)
+
+    selected: list[_DecayDataset] = []
+    for mode_datasets in by_mode.values():
+        if len(mode_datasets) == 1:
+            selected.append(mode_datasets[0])
+            continue
+        candidates = [
+            (parent_id, dataset, dataset.dataset_id, _radiation_count(dataset)) for dataset in mode_datasets
+        ]
+        _, best, _, _ = _select_preferred_dataset(candidates, adopted_xrefs)
+        selected.append(best)
+    return selected
+
+
+def _radiation_from_datasets(datasets: list[_DecayDataset]) -> tuple[
+    tuple[radiation.Alpha, ...],
+    tuple[radiation.BetaPlus | radiation.BetaMinus, ...],
+    tuple[radiation.Gamma, ...],
+    tuple[radiation.Xray, ...],
+]:
+    return (
+        tuple(alpha for dataset in datasets for alpha in dataset.alphas),
+        tuple(beta for dataset in datasets for beta in dataset.betas),
+        tuple(gamma for dataset in datasets for gamma in dataset.gammas),
+        tuple(xray for dataset in datasets for xray in dataset.xrays),
+    )
+
+
 def _branches_for_half_life(
     datasets: list[_DecayDataset],
     adopted: _AdoptedNuclideData | None,
@@ -766,33 +854,41 @@ def _branches_for_half_life(
 
 
 def _merge_datasets_at_half_life(
+    parent_id: str,
     datasets: list[_DecayDataset],
     adopted: _AdoptedNuclideData | None,
+    adopted_xrefs: frozenset[str],
 ) -> radiation.Decay:
     half_life_s = datasets[0].half_life_s
     branches = _branches_for_half_life(datasets, adopted, half_life_s)
-    primary = max(datasets, key=_radiation_count)
+    radiation_datasets = _selected_datasets_for_radiation(parent_id, datasets, adopted, adopted_xrefs)
+    primary = max(radiation_datasets, key=_radiation_count)
+    alphas, betas, gammas, xrays = _radiation_from_datasets(radiation_datasets)
 
     return radiation.Decay(
         dataset_id=primary.dataset_id,
         half_life_s=half_life_s,
         branches=branches,
-        alphas=tuple(alpha for dataset in datasets for alpha in dataset.alphas),
-        betas=tuple(beta for dataset in datasets for beta in dataset.betas),
-        gammas=tuple(gamma for dataset in datasets for gamma in dataset.gammas),
-        xrays=tuple(xray for dataset in datasets for xray in dataset.xrays),
+        alphas=alphas,
+        betas=betas,
+        gammas=gammas,
+        xrays=xrays,
     )
 
 
 def _finalize_parent_decays(
+    parent_id: str,
     datasets: list[_DecayDataset],
     adopted: _AdoptedNuclideData | None,
+    adopted_xrefs: frozenset[str],
 ) -> list[radiation.Decay]:
     by_half_life: dict[float, list[_DecayDataset]] = {}
     for dataset in datasets:
         by_half_life.setdefault(round(dataset.half_life_s, 6), []).append(dataset)
 
-    return [_merge_datasets_at_half_life(group, adopted) for group in by_half_life.values()]
+    return [
+        _merge_datasets_at_half_life(parent_id, group, adopted, adopted_xrefs) for group in by_half_life.values()
+    ]
 
 
 def _recommended_half_life_s(
@@ -969,6 +1065,7 @@ def parse_ensdf_file(path: str | Path) -> _EnsdfFileData:
     )
 
 
+@cache
 def parse_ensdf_directory(path: str | Path) -> dict[str, ParsedRadioNuclide]:
     """Parse all ensdf.* files in a directory."""
     path = Path(path)
@@ -984,6 +1081,7 @@ def parse_ensdf_directory(path: str | Path) -> dict[str, ParsedRadioNuclide]:
             all_datasets.setdefault(parent_id, []).extend(datasets)
 
     xref_set = frozenset(adopted_xrefs)
+    parent_xref_index = _build_parent_xref_index(xref_set)
     result: dict[str, ParsedRadioNuclide] = {}
     for parent_id, parent_datasets in all_datasets.items():
         adopted = adopted_map.get(parent_id)
@@ -992,7 +1090,8 @@ def parse_ensdf_directory(path: str | Path) -> dict[str, ParsedRadioNuclide]:
             for dataset in parent_datasets
         ]
         deduped = _dedupe_datasets_for_parent(parent_id, normalized, xref_set)
-        finalized = _finalize_parent_decays(deduped, adopted)
+        filtered = _filter_datasets_by_adopted_xrefs(parent_id, deduped, adopted, parent_xref_index)
+        finalized = _finalize_parent_decays(parent_id, filtered, adopted, xref_set)
         result[parent_id] = ParsedRadioNuclide(
             decays=tuple(finalized),
             recommended_half_life_s=_recommended_half_life_s(finalized, adopted),

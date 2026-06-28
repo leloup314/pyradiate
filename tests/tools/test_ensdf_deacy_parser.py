@@ -26,9 +26,9 @@ def test_ensdf_parser():
             n_xrays += len(mode.xrays)
 
     assert n_isos == 2570
-    assert n_gammas == 114641
-    assert n_alphas == 2736
-    assert n_betas == 11809
+    assert n_gammas == 107824
+    assert n_alphas == 2685
+    assert n_betas == 11555
     assert n_xrays == 546
 
 
@@ -164,3 +164,10 @@ def test_ensdf_parser_skips_e_records_for_pure_ec_decay():
     data = decay_parser.parse_ensdf_directory(ensdf_path)
     be7 = data["7Be"]
     assert all(len(decay.betas) == 0 for decay in be7.decays)
+
+
+def test_ensdf_parser_prefers_adopted_xref_dataset_over_merge():
+    data = decay_parser.parse_ensdf_directory(ensdf_path)
+    cf252 = data["252Cf"]
+    assert len(cf252.decays) == 1
+    assert len(cf252.decays[0].gammas) < 200
