@@ -26,3 +26,7 @@ jobs:
         run: python -m pyradiate.tools.ensdf.lib_updater
       - name: Test
         run: pytest
+      - name: Rebuild NIST archives
+        run: |
+          python -m pyradiate.tools.nist.lib_builder
+          pytest tests/tools/test_nist.py

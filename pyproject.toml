@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.dynamic]
 version = {attr = "pyradiate.__version__"}
 
+[tool.setuptools.package-data]
+"pyradiate.tools.nist" = ["data/*.npz"]
+
 [project]
 name = "pyradiate"
 dynamic = ["version"]
