@@ -23,6 +23,6 @@ jobs:
           pip install --upgrade pip
           pip install .[test]
       - name: Collect ENSDF archives
-        run: python pyradiate/tools/ensdf/lib_updater.py
+        run: python -m pyradiate.tools.ensdf.lib_updater
       - name: Test
         run: pytest
